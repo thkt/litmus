@@ -1,0 +1,239 @@
+use std::fs;
+use std::process::Command;
+use tempfile::TempDir;
+
+fn litmus(dir: &std::path::Path) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_litmus"))
+        .arg(dir)
+        .output()
+        .expect("failed to run litmus")
+}
+
+// T-015: issues present → exit 1 + stdout has file path and line number
+#[test]
+fn exit_1_with_issues() {
+    let dir = TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("weak.test.ts"),
+        r#"test("weak only", () => { expect(x).toBeTruthy() })"#,
+    )
+    .unwrap();
+
+    let output = litmus(dir.path());
+    assert_eq!(output.status.code(), Some(1));
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("weak-assertion"), "stdout: {stdout}");
+    assert!(stdout.contains("weak.test.ts:1"), "stdout: {stdout}");
+    assert!(stdout.contains("weak only"), "stdout: {stdout}");
+}
+
+// T-015 variant: mock overuse also reported
+#[test]
+fn exit_1_mock_overuse() {
+    let dir = TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("mocks.test.ts"),
+        r#"test("too many mocks", () => {
+    const a = vi.fn()
+    const b = vi.fn()
+    const c = vi.fn()
+    expect(result).toBe(1)
+})"#,
+    )
+    .unwrap();
+
+    let output = litmus(dir.path());
+    assert_eq!(output.status.code(), Some(1));
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("mock-overuse"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("mocks: 3, assertions: 1"),
+        "stdout: {stdout}"
+    );
+}
+
+// T-016: no issues → exit 0
+#[test]
+fn exit_0_no_issues() {
+    let dir = TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("good.test.ts"),
+        r#"test("returns correct user data", () => {
+    expect(result).toBe(42)
+    expect(name).toEqual("hello")
+})"#,
+    )
+    .unwrap();
+
+    let output = litmus(dir.path());
+    assert_eq!(output.status.code(), Some(0));
+    assert!(String::from_utf8(output.stdout).unwrap().is_empty());
+}
+
+// T-017: no test files → exit 0
+#[test]
+fn exit_0_no_test_files() {
+    let dir = TempDir::new().unwrap();
+
+    let output = litmus(dir.path());
+    assert_eq!(output.status.code(), Some(0));
+}
+
+// T-018: parse error file skipped, others still processed
+#[test]
+fn parse_error_skipped_others_processed() {
+    let dir = TempDir::new().unwrap();
+
+    fs::write(
+        dir.path().join("valid.test.ts"),
+        r#"test("weak", () => { expect(x).toBeTruthy() })"#,
+    )
+    .unwrap();
+
+    fs::write(dir.path().join("broken.test.ts"), "@@@ not javascript $$$")
+        .unwrap();
+
+    let output = litmus(dir.path());
+
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("broken.test.ts"),
+        "stderr should warn about broken file: {stderr}"
+    );
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("valid.test.ts"),
+        "stdout should still report valid file issues: {stdout}"
+    );
+}
+
+// RC-002: .test.tsx files detected and analyzed
+#[test]
+fn tsx_files_detected() {
+    let dir = TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("comp.test.tsx"),
+        r#"test("tsx weak", () => { expect(x).toBeTruthy() })"#,
+    )
+    .unwrap();
+
+    let output = litmus(dir.path());
+    assert_eq!(output.status.code(), Some(1));
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("comp.test.tsx"), "stdout: {stdout}");
+}
+
+// TC-007: read error (directory where file expected) — skipped, others processed
+#[test]
+fn read_error_skipped_others_processed() {
+    let dir = TempDir::new().unwrap();
+
+    fs::write(
+        dir.path().join("valid.test.ts"),
+        r#"test("weak", () => { expect(x).toBeTruthy() })"#,
+    )
+    .unwrap();
+
+    fs::create_dir(dir.path().join("unreadable.test.ts")).unwrap();
+
+    let output = litmus(dir.path());
+
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("unreadable.test.ts"),
+        "stderr should warn about unreadable file: {stderr}"
+    );
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("valid.test.ts"),
+        "valid file should still be processed: {stdout}"
+    );
+}
+
+// node_modules excluded from scanning
+#[test]
+fn excludes_node_modules() {
+    let dir = TempDir::new().unwrap();
+
+    let nm = dir.path().join("node_modules/zod/src");
+    fs::create_dir_all(&nm).unwrap();
+    fs::write(
+        nm.join("base.test.ts"),
+        r#"test("weak", () => { expect(x).toBeTruthy() })"#,
+    )
+    .unwrap();
+
+    let output = litmus(dir.path());
+    assert_eq!(output.status.code(), Some(0), "node_modules should be excluded");
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.is_empty(), "no output expected: {stdout}");
+}
+
+// T-040: tautological + mock-only detection via CLI
+#[test]
+fn detects_tautological_and_mock_only() {
+    let dir = TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("behavior.test.ts"),
+        r#"
+test("tautological", () => {
+    expect(true).toBe(true)
+})
+test("mock only", () => {
+    expect(mockFn).toHaveBeenCalledWith("/api")
+    expect(mockFn).toHaveBeenCalledTimes(1)
+})
+"#,
+    )
+    .unwrap();
+
+    let output = litmus(dir.path());
+    assert_eq!(output.status.code(), Some(1));
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("tautological"), "stdout: {stdout}");
+    assert!(stdout.contains("mock-only"), "stdout: {stdout}");
+}
+
+// T-052: short test name → exit 1 with test-name-quality
+#[test]
+fn test_name_quality_short_name_detected() {
+    let dir = TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("naming.test.ts"),
+        r#"test("should work", () => {
+    expect(result).toBe(42)
+})"#,
+    )
+    .unwrap();
+
+    let output = litmus(dir.path());
+    assert_eq!(output.status.code(), Some(1));
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("test-name-quality"), "stdout: {stdout}");
+    assert!(stdout.contains("should work"), "stdout: {stdout}");
+    assert!(stdout.contains("words: 2"), "stdout: {stdout}");
+}
+
+// T-053: 4-word test name → exit 0
+#[test]
+fn test_name_quality_good_name_passes() {
+    let dir = TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("good_name.test.ts"),
+        r#"test("returns user by id", () => {
+    expect(result).toBe(42)
+})"#,
+    )
+    .unwrap();
+
+    let output = litmus(dir.path());
+    assert_eq!(output.status.code(), Some(0));
+}
