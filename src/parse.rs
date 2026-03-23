@@ -260,30 +260,7 @@ fn scan_statement(
             scan_statement(&do_while.body, source, assertions, mocks, catch_swallows, context);
         }
         Statement::TryStatement(try_stmt) => {
-            // Try block: propagate assertions to parent, context = TryBlock
-            scan_body(&try_stmt.block.body, source, assertions, mocks, catch_swallows, AssertionContext::TryBlock);
-
-            // Catch block: independent scan for catch-swallow detection
-            if let Some(handler) = &try_stmt.handler {
-                let mut catch_assertions = Vec::new();
-                let mut catch_has_throw = false;
-                for catch_stmt in &handler.body.body {
-                    if matches!(catch_stmt, Statement::ThrowStatement(_)) {
-                        catch_has_throw = true;
-                    }
-                    scan_statement(catch_stmt, source, &mut catch_assertions, mocks, catch_swallows, &AssertionContext::CatchBlock);
-                }
-                if catch_assertions.is_empty() && !catch_has_throw {
-                    let catch_line = offset_to_line(source, handler.span.start);
-                    catch_swallows.push(catch_line);
-                }
-                // Merge catch assertions into parent
-                assertions.extend(catch_assertions);
-            }
-
-            if let Some(finalizer) = &try_stmt.finalizer {
-                scan_body(&finalizer.body, source, assertions, mocks, catch_swallows, context.clone());
-            }
+            scan_try_statement(try_stmt, source, assertions, mocks, catch_swallows, context);
         }
         Statement::SwitchStatement(switch_stmt) => {
             for case in &switch_stmt.cases {
@@ -291,6 +268,38 @@ fn scan_statement(
             }
         }
         _ => {}
+    }
+}
+
+fn scan_try_statement(
+    try_stmt: &TryStatement<'_>,
+    source: &str,
+    assertions: &mut Vec<Assertion>,
+    mocks: &mut Vec<MockCall>,
+    catch_swallows: &mut Vec<u32>,
+    context: &AssertionContext,
+) {
+    scan_body(&try_stmt.block.body, source, assertions, mocks, catch_swallows, AssertionContext::TryBlock);
+
+    if let Some(handler) = &try_stmt.handler {
+        if handler.body.body.is_empty() {
+            catch_swallows.push(offset_to_line(source, handler.span.start));
+        } else {
+            let mut catch_assertions = Vec::new();
+            for catch_stmt in &handler.body.body {
+                scan_statement(catch_stmt, source, &mut catch_assertions, mocks, catch_swallows, &AssertionContext::CatchBlock);
+            }
+            if catch_assertions.is_empty()
+                && !handler.body.body.iter().any(|s| matches!(s, Statement::ThrowStatement(_)))
+            {
+                catch_swallows.push(offset_to_line(source, handler.span.start));
+            }
+            assertions.extend(catch_assertions);
+        }
+    }
+
+    if let Some(finalizer) = &try_stmt.finalizer {
+        scan_body(&finalizer.body, source, assertions, mocks, catch_swallows, context.clone());
     }
 }
 
@@ -661,21 +670,6 @@ describe("outer", () => {
         assert_eq!(blocks[0].assertions.len(), 1);
     }
 
-    // RC-001: test.only recognized
-    #[test]
-    fn recognizes_test_only() {
-        let blocks = parse(r#"test.only("focused", () => { expect(x).toBe(1) })"#);
-        assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0].name, "focused");
-    }
-
-    // RC-001: test.skip recognized
-    #[test]
-    fn recognizes_test_skip() {
-        let blocks = parse(r#"test.skip("skipped", () => { expect(x).toBe(1) })"#);
-        assert_eq!(blocks.len(), 1);
-    }
-
     // RC-001: describe.only recognized
     #[test]
     fn recognizes_describe_only() {
@@ -723,71 +717,28 @@ describe("outer", () => {
         assert_eq!(blocks.len(), 0);
     }
 
-    // T-024: boolean literal → Literal
+    // T-024..T-030, T-041, T-042: target kind classification
     #[test]
-    fn target_kind_boolean_literal() {
-        let blocks = parse(r#"test("x", () => { expect(true).toBe(true) })"#);
-        assert_eq!(blocks[0].assertions[0].target_kind, TargetKind::Literal);
+    fn target_kind_classification() {
+        let cases: Vec<(&str, TargetKind)> = vec![
+            (r#"test("x", () => { expect(true).toBe(true) })"#, TargetKind::Literal),
+            (r#"test("x", () => { expect(42).toBe(42) })"#, TargetKind::Literal),
+            (r#"test("x", () => { expect("hello").toEqual("hello") })"#, TargetKind::Literal),
+            (r#"test("x", () => { expect(null).toBeNull() })"#, TargetKind::Literal),
+            (r#"test("x", () => { expect(result).toBe(42) })"#, TargetKind::Identifier),
+            (r#"test("x", () => { expect(fetchUser(1)).toBe(42) })"#, TargetKind::CallResult),
+            (r#"test("x", () => { expect(obj.prop).toBe(42) })"#, TargetKind::Other),
+            (r#"test("x", async () => { expect(await fn()).toBe(1) })"#, TargetKind::CallResult),
+            (r#"test("x", () => { expect((result)).toBe(1) })"#, TargetKind::Identifier),
+        ];
+        for (source, expected) in cases {
+            let blocks = parse(source);
+            assert_eq!(
+                blocks[0].assertions[0].target_kind, expected,
+                "source: {source}"
+            );
+        }
     }
-
-    // T-025: numeric literal → Literal
-    #[test]
-    fn target_kind_numeric_literal() {
-        let blocks = parse(r#"test("x", () => { expect(42).toBe(42) })"#);
-        assert_eq!(blocks[0].assertions[0].target_kind, TargetKind::Literal);
-    }
-
-    // T-026: string literal → Literal
-    #[test]
-    fn target_kind_string_literal() {
-        let blocks = parse(r#"test("x", () => { expect("hello").toEqual("hello") })"#);
-        assert_eq!(blocks[0].assertions[0].target_kind, TargetKind::Literal);
-    }
-
-    // T-027: null literal → Literal
-    #[test]
-    fn target_kind_null_literal() {
-        let blocks = parse(r#"test("x", () => { expect(null).toBeNull() })"#);
-        assert_eq!(blocks[0].assertions[0].target_kind, TargetKind::Literal);
-    }
-
-    // T-028: identifier → Identifier
-    #[test]
-    fn target_kind_identifier() {
-        let blocks = parse(r#"test("x", () => { expect(result).toBe(42) })"#);
-        assert_eq!(blocks[0].assertions[0].target_kind, TargetKind::Identifier);
-    }
-
-    // T-029: call expression → CallResult
-    #[test]
-    fn target_kind_call_result() {
-        let blocks = parse(r#"test("x", () => { expect(fetchUser(1)).toBe(42) })"#);
-        assert_eq!(blocks[0].assertions[0].target_kind, TargetKind::CallResult);
-    }
-
-    // T-030: member expression → Other
-    #[test]
-    fn target_kind_member_expression() {
-        let blocks = parse(r#"test("x", () => { expect(obj.prop).toBe(42) })"#);
-        assert_eq!(blocks[0].assertions[0].target_kind, TargetKind::Other);
-    }
-
-    // T-041: await expression → unwrap to CallResult
-    #[test]
-    fn target_kind_await_unwraps() {
-        let source = r#"test("x", async () => { expect(await fn()).toBe(1) })"#;
-        let blocks = parse(source);
-        assert_eq!(blocks[0].assertions[0].target_kind, TargetKind::CallResult);
-    }
-
-    // T-042: parenthesized expression → unwrap to Identifier
-    #[test]
-    fn target_kind_paren_unwraps() {
-        let blocks = parse(r#"test("x", () => { expect((result)).toBe(1) })"#);
-        assert_eq!(blocks[0].assertions[0].target_kind, TargetKind::Identifier);
-    }
-
-    // --- Phase 2: TestModifier ---
 
     // T-101: test.skip → modifier == Some(Skip)
     #[test]
@@ -827,8 +778,6 @@ describe("outer", () => {
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].modifier, Some(TestModifier::Skip));
     }
-
-    // --- Phase 2: AssertionContext ---
 
     // T-106: top-level assertion → TopLevel
     #[test]
@@ -905,8 +854,6 @@ describe("outer", () => {
         assert_eq!(blocks[0].assertions[0].context, AssertionContext::IfBranch);
     }
 
-    // --- Phase 2: ThrowStatement recognition ---
-
     // T-112: catch with throw e → no catch_swallow
     #[test]
     fn throw_in_catch_no_swallow() {
@@ -935,8 +882,6 @@ describe("outer", () => {
         assert!(blocks[0].catch_swallows.is_empty());
     }
 
-    // --- Phase 2: has_empty_body ---
-
     // T-114: empty body → has_empty_body == true
     #[test]
     fn empty_body_detected() {
@@ -958,8 +903,6 @@ describe("outer", () => {
         let blocks = parse(r#"test("x", () => { const x = 1 })"#);
         assert!(!blocks[0].has_empty_body);
     }
-
-    // --- Phase 2: catch_swallows ---
 
     // T-117: try-catch, catch empty → catch_swallows has entry
     #[test]
@@ -1047,5 +990,22 @@ describe("outer", () => {
         assert_eq!(blocks.len(), 1);
         assert!(blocks[0].has_empty_body);
         assert_eq!(blocks[0].modifier, Some(TestModifier::Todo));
+    }
+
+    // TC-004: try-catch-finally with assertion in finally
+    #[test]
+    fn finally_block_assertion_tracked() {
+        let source = r#"test("x", () => {
+            try {
+                riskyOp()
+            } catch (e) {
+            } finally {
+                expect(cleanup).toBe(true)
+            }
+        })"#;
+        let blocks = parse(source);
+        assert_eq!(blocks[0].assertions.len(), 1);
+        assert_eq!(blocks[0].assertions[0].context, AssertionContext::TopLevel);
+        assert_eq!(blocks[0].catch_swallows.len(), 1);
     }
 }

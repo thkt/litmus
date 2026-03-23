@@ -395,8 +395,6 @@ mod tests {
         );
     }
 
-    // --- Phase 1.5: behavior assertion rules ---
-
     fn literal_assertion(target: &str) -> Assertion {
         Assertion {
             line: 2,
@@ -493,8 +491,6 @@ mod tests {
         assert_eq!(issues.len(), 1);
     }
 
-    // --- Phase 1.6: test name quality ---
-
     fn named_block(name: &str) -> TestBlock {
         TestBlock {
             name: name.into(),
@@ -578,8 +574,6 @@ mod tests {
         assert!(issues[0].detail.contains("words: 0"));
     }
 
-    // --- Phase 2: New fraud detection rules ---
-
     fn empty_block() -> TestBlock {
         TestBlock {
             name: "test case".into(),
@@ -640,22 +634,15 @@ mod tests {
         assert_eq!(issues.len(), 0);
     }
 
-    // T-204: modifier Skip → skipped-test
+    // T-204, T-205: Skip and Todo → skipped-test
     #[test]
-    fn skipped_test_skip_detected() {
-        let blocks = vec![skipped_block(TestModifier::Skip)];
-        let issues = check_skipped_test(&blocks, path());
-        assert_eq!(issues.len(), 1);
-        assert_eq!(issues[0].rule, "skipped-test");
-    }
-
-    // T-205: modifier Todo → skipped-test
-    #[test]
-    fn skipped_test_todo_detected() {
-        let blocks = vec![skipped_block(TestModifier::Todo)];
-        let issues = check_skipped_test(&blocks, path());
-        assert_eq!(issues.len(), 1);
-        assert_eq!(issues[0].rule, "skipped-test");
+    fn skipped_test_detected() {
+        for modifier in [TestModifier::Skip, TestModifier::Todo] {
+            let blocks = vec![skipped_block(modifier)];
+            let issues = check_skipped_test(&blocks, path());
+            assert_eq!(issues.len(), 1);
+            assert_eq!(issues[0].rule, "skipped-test");
+        }
     }
 
     // T-206: modifier Only → no issue
@@ -695,8 +682,7 @@ mod tests {
     // T-210: all assertions IfBranch → conditional-assertion
     #[test]
     fn conditional_assertion_all_if() {
-        let mut b = block(vec![assertion_with_context(AssertionContext::IfBranch)], vec![]);
-        let _ = &mut b; // ensure borrow
+        let b = block(vec![assertion_with_context(AssertionContext::IfBranch)], vec![]);
         let issues = check_conditional_assertion(&[b], path());
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].rule, "conditional-assertion");

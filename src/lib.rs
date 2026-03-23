@@ -12,7 +12,6 @@ use std::path::{Path, PathBuf};
 
 const EXCLUDED_DIRS: &[&str] = &["node_modules", ".git", "dist", "build", "target"];
 
-/// A file that could not be read or parsed during analysis.
 #[derive(Debug)]
 pub struct FileError {
     pub file: PathBuf,
@@ -20,7 +19,6 @@ pub struct FileError {
     pub message: String,
 }
 
-/// Whether a [`FileError`] occurred during file read or AST parse.
 #[derive(Debug)]
 pub enum FileErrorKind {
     Read,
@@ -42,7 +40,6 @@ pub struct AnalysisResult {
     pub errors: Vec<FileError>,
 }
 
-/// Discover test files under `dir`, skipping build-artifact directories.
 pub fn find_test_files(dir: &Path) -> Vec<PathBuf> {
     let patterns = [
         dir.join("**/*.test.ts"),

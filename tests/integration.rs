@@ -238,8 +238,6 @@ fn test_name_quality_good_name_passes() {
     assert_eq!(output.status.code(), Some(0));
 }
 
-// --- Fraud detection integration tests ---
-
 // T-301: empty body → empty-test
 #[test]
 fn detects_empty_test() {
@@ -368,4 +366,48 @@ fn empty_test_suppresses_weak_assertion() {
         !stdout.contains("weak-assertion"),
         "should NOT have weak-assertion: {stdout}"
     );
+}
+
+// TC-005: mixed TopLevel + if assertions → no conditional-assertion
+#[test]
+fn mixed_conditional_no_issue() {
+    let dir = TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("mixed.test.ts"),
+        r#"test("mixed assertions are fine", () => {
+    expect(base).toBe(1)
+    if (condition) {
+        expect(extra).toBe(2)
+    }
+})"#,
+    )
+    .unwrap();
+
+    let output = litmus(dir.path());
+    assert_eq!(output.status.code(), Some(0));
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        !stdout.contains("conditional-assertion"),
+        "should NOT have conditional-assertion: {stdout}"
+    );
+}
+
+// TC-008: comment-only body → empty-test
+#[test]
+fn comment_only_body_is_empty() {
+    let dir = TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("comment.test.ts"),
+        r#"test("placeholder with comment", () => {
+    // TODO: implement this test
+})"#,
+    )
+    .unwrap();
+
+    let output = litmus(dir.path());
+    assert_eq!(output.status.code(), Some(1));
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("empty-test"), "should have empty-test: {stdout}");
 }
