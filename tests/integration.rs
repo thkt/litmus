@@ -237,3 +237,135 @@ fn test_name_quality_good_name_passes() {
     let output = litmus(dir.path());
     assert_eq!(output.status.code(), Some(0));
 }
+
+// --- Fraud detection integration tests ---
+
+// T-301: empty body → empty-test
+#[test]
+fn detects_empty_test() {
+    let dir = TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("empty.test.ts"),
+        r#"test("does nothing", () => {})"#,
+    )
+    .unwrap();
+
+    let output = litmus(dir.path());
+    assert_eq!(output.status.code(), Some(1));
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("empty-test"), "stdout: {stdout}");
+}
+
+// T-302: test.skip → skipped-test
+#[test]
+fn detects_skipped_test() {
+    let dir = TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("skip.test.ts"),
+        r#"test.skip("skipped test case", () => {
+    expect(result).toBe(42)
+})"#,
+    )
+    .unwrap();
+
+    let output = litmus(dir.path());
+    assert_eq!(output.status.code(), Some(1));
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("skipped-test"), "stdout: {stdout}");
+}
+
+// T-303: try-catch swallow → catch-swallow
+#[test]
+fn detects_catch_swallow() {
+    let dir = TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("swallow.test.ts"),
+        r#"test("swallows errors silently", () => {
+    try {
+        riskyOperation()
+        expect(result).toBe(42)
+    } catch (e) {}
+})"#,
+    )
+    .unwrap();
+
+    let output = litmus(dir.path());
+    assert_eq!(output.status.code(), Some(1));
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("catch-swallow"), "stdout: {stdout}");
+}
+
+// T-304: all assertions in if → conditional-assertion
+#[test]
+fn detects_conditional_assertion() {
+    let dir = TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("conditional.test.ts"),
+        r#"test("only asserts conditionally", () => {
+    const result = getResult()
+    if (result) {
+        expect(result.name).toBe("foo")
+    }
+})"#,
+    )
+    .unwrap();
+
+    let output = litmus(dir.path());
+    assert_eq!(output.status.code(), Some(1));
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("conditional-assertion"),
+        "stdout: {stdout}"
+    );
+}
+
+// T-305: all assertions in catch → catch-only-assertion
+#[test]
+fn detects_catch_only_assertion() {
+    let dir = TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("catchonly.test.ts"),
+        r#"test("only asserts on error", () => {
+    try {
+        dangerousOp()
+    } catch (e) {
+        expect(e.message).toBe("fail")
+    }
+})"#,
+    )
+    .unwrap();
+
+    let output = litmus(dir.path());
+    assert_eq!(output.status.code(), Some(1));
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("catch-only-assertion"),
+        "stdout: {stdout}"
+    );
+}
+
+// T-306: empty body → empty-test only (no weak-assertion)
+#[test]
+fn empty_test_suppresses_weak_assertion() {
+    let dir = TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("empty_only.test.ts"),
+        r#"test("empty suppresses weak", () => {})"#,
+    )
+    .unwrap();
+
+    let output = litmus(dir.path());
+    assert_eq!(output.status.code(), Some(1));
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("empty-test"), "should have empty-test: {stdout}");
+    assert!(
+        !stdout.contains("weak-assertion"),
+        "should NOT have weak-assertion: {stdout}"
+    );
+}

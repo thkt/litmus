@@ -5,11 +5,29 @@ use oxc_span::{GetSpan, SourceType};
 use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum TestModifier {
+    Skip,
+    Todo,
+    Only,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum AssertionContext {
+    TopLevel,
+    IfBranch,
+    TryBlock,
+    CatchBlock,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct TestBlock {
     pub name: String,
     pub line: u32,
     pub assertions: Vec<Assertion>,
     pub mock_calls: Vec<MockCall>,
+    pub modifier: Option<TestModifier>,
+    pub has_empty_body: bool,
+    pub catch_swallows: Vec<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -27,6 +45,7 @@ pub struct Assertion {
     pub target_kind: TargetKind,
     pub matcher: String,
     pub is_weak: bool,
+    pub context: AssertionContext,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -81,13 +100,33 @@ fn check_test_call(expr: &Expression<'_>, source: &str, blocks: &mut Vec<TestBlo
         return;
     };
 
-    match callee_name(&call.callee) {
-        Some("test" | "it") => {
-            if let Some(block) = extract_test_block(call, source) {
+    let (name, modifier) = match callee_name(&call.callee) {
+        Some(pair) => pair,
+        None => return,
+    };
+
+    match name {
+        "test" | "it" => {
+            if let Some(mut block) = extract_test_block(call, source) {
+                block.modifier = modifier;
                 blocks.push(block);
+            } else if modifier == Some(TestModifier::Todo) {
+                // test.todo("x") has no callback — create minimal block
+                if let Some(name) = first_string_arg(&call.arguments) {
+                    let line = offset_to_line(source, call.span.start);
+                    blocks.push(TestBlock {
+                        name,
+                        line,
+                        assertions: Vec::new(),
+                        mock_calls: Vec::new(),
+                        modifier: Some(TestModifier::Todo),
+                        has_empty_body: true,
+                        catch_swallows: Vec::new(),
+                    });
+                }
             }
         }
-        Some("describe") => {
+        "describe" => {
             if let Some(body) = callback_body(&call.arguments) {
                 walk_statements(&body.statements, source, blocks);
             }
@@ -96,14 +135,18 @@ fn check_test_call(expr: &Expression<'_>, source: &str, blocks: &mut Vec<TestBlo
     }
 }
 
-fn callee_name<'a>(expr: &'a Expression<'a>) -> Option<&'a str> {
+fn callee_name<'a>(expr: &'a Expression<'a>) -> Option<(&'a str, Option<TestModifier>)> {
     match expr {
-        Expression::Identifier(id) => Some(&id.name),
+        Expression::Identifier(id) => Some((&id.name, None)),
         Expression::StaticMemberExpression(member) => {
-            if matches!(&*member.property.name, "only" | "skip" | "todo") {
-                if let Expression::Identifier(id) = &member.object {
-                    return Some(&id.name);
-                }
+            let modifier = match &*member.property.name {
+                "skip" => Some(TestModifier::Skip),
+                "todo" => Some(TestModifier::Todo),
+                "only" => Some(TestModifier::Only),
+                _ => return None,
+            };
+            if let Expression::Identifier(id) = &member.object {
+                return Some((&id.name, modifier));
             }
             None
         }
@@ -115,16 +158,28 @@ fn extract_test_block(call: &CallExpression<'_>, source: &str) -> Option<TestBlo
     let name = first_string_arg(&call.arguments)?;
     let body = callback_body(&call.arguments)?;
     let line = offset_to_line(source, call.span.start);
+    let has_empty_body = body.statements.is_empty();
 
     let mut assertions = Vec::new();
     let mut mock_calls = Vec::new();
-    scan_body(&body.statements, source, &mut assertions, &mut mock_calls);
+    let mut catch_swallows = Vec::new();
+    scan_body(
+        &body.statements,
+        source,
+        &mut assertions,
+        &mut mock_calls,
+        &mut catch_swallows,
+        AssertionContext::TopLevel,
+    );
 
     Some(TestBlock {
         name,
         line,
         assertions,
         mock_calls,
+        modifier: None,
+        has_empty_body,
+        catch_swallows,
     })
 }
 
@@ -148,9 +203,11 @@ fn scan_body(
     source: &str,
     assertions: &mut Vec<Assertion>,
     mocks: &mut Vec<MockCall>,
+    catch_swallows: &mut Vec<u32>,
+    context: AssertionContext,
 ) {
     for stmt in stmts {
-        scan_statement(stmt, source, assertions, mocks);
+        scan_statement(stmt, source, assertions, mocks, catch_swallows, &context);
     }
 }
 
@@ -159,59 +216,78 @@ fn scan_statement(
     source: &str,
     assertions: &mut Vec<Assertion>,
     mocks: &mut Vec<MockCall>,
+    catch_swallows: &mut Vec<u32>,
+    context: &AssertionContext,
 ) {
     match stmt {
         Statement::ExpressionStatement(es) => {
-            scan_expr(&es.expression, source, assertions, mocks);
+            scan_expr(&es.expression, source, assertions, mocks, context);
         }
         Statement::VariableDeclaration(vd) => {
             for decl in &vd.declarations {
                 if let Some(init) = &decl.init {
-                    scan_expr(init, source, assertions, mocks);
+                    scan_expr(init, source, assertions, mocks, context);
                 }
             }
         }
         Statement::ReturnStatement(rs) => {
             if let Some(arg) = &rs.argument {
-                scan_expr(arg, source, assertions, mocks);
+                scan_expr(arg, source, assertions, mocks, context);
             }
         }
         Statement::BlockStatement(bs) => {
-            scan_body(&bs.body, source, assertions, mocks);
+            scan_body(&bs.body, source, assertions, mocks, catch_swallows, context.clone());
         }
         Statement::IfStatement(if_stmt) => {
-            scan_statement(&if_stmt.consequent, source, assertions, mocks);
+            scan_statement(&if_stmt.consequent, source, assertions, mocks, catch_swallows, &AssertionContext::IfBranch);
             if let Some(alt) = &if_stmt.alternate {
-                scan_statement(alt, source, assertions, mocks);
+                scan_statement(alt, source, assertions, mocks, catch_swallows, &AssertionContext::IfBranch);
             }
         }
         Statement::ForStatement(for_stmt) => {
-            scan_statement(&for_stmt.body, source, assertions, mocks);
+            scan_statement(&for_stmt.body, source, assertions, mocks, catch_swallows, context);
         }
         Statement::ForInStatement(for_in) => {
-            scan_statement(&for_in.body, source, assertions, mocks);
+            scan_statement(&for_in.body, source, assertions, mocks, catch_swallows, context);
         }
         Statement::ForOfStatement(for_of) => {
-            scan_statement(&for_of.body, source, assertions, mocks);
+            scan_statement(&for_of.body, source, assertions, mocks, catch_swallows, context);
         }
         Statement::WhileStatement(while_stmt) => {
-            scan_statement(&while_stmt.body, source, assertions, mocks);
+            scan_statement(&while_stmt.body, source, assertions, mocks, catch_swallows, context);
         }
         Statement::DoWhileStatement(do_while) => {
-            scan_statement(&do_while.body, source, assertions, mocks);
+            scan_statement(&do_while.body, source, assertions, mocks, catch_swallows, context);
         }
         Statement::TryStatement(try_stmt) => {
-            scan_body(&try_stmt.block.body, source, assertions, mocks);
+            // Try block: propagate assertions to parent, context = TryBlock
+            scan_body(&try_stmt.block.body, source, assertions, mocks, catch_swallows, AssertionContext::TryBlock);
+
+            // Catch block: independent scan for catch-swallow detection
             if let Some(handler) = &try_stmt.handler {
-                scan_body(&handler.body.body, source, assertions, mocks);
+                let mut catch_assertions = Vec::new();
+                let mut catch_has_throw = false;
+                for catch_stmt in &handler.body.body {
+                    if matches!(catch_stmt, Statement::ThrowStatement(_)) {
+                        catch_has_throw = true;
+                    }
+                    scan_statement(catch_stmt, source, &mut catch_assertions, mocks, catch_swallows, &AssertionContext::CatchBlock);
+                }
+                if catch_assertions.is_empty() && !catch_has_throw {
+                    let catch_line = offset_to_line(source, handler.span.start);
+                    catch_swallows.push(catch_line);
+                }
+                // Merge catch assertions into parent
+                assertions.extend(catch_assertions);
             }
+
             if let Some(finalizer) = &try_stmt.finalizer {
-                scan_body(&finalizer.body, source, assertions, mocks);
+                scan_body(&finalizer.body, source, assertions, mocks, catch_swallows, context.clone());
             }
         }
         Statement::SwitchStatement(switch_stmt) => {
             for case in &switch_stmt.cases {
-                scan_body(&case.consequent, source, assertions, mocks);
+                scan_body(&case.consequent, source, assertions, mocks, catch_swallows, context.clone());
             }
         }
         _ => {}
@@ -223,29 +299,30 @@ fn scan_expr(
     source: &str,
     assertions: &mut Vec<Assertion>,
     mocks: &mut Vec<MockCall>,
+    context: &AssertionContext,
 ) {
     match expr {
         Expression::CallExpression(call) => {
-            if let Some(a) = try_assertion(call, source) {
+            if let Some(a) = try_assertion(call, source, context) {
                 assertions.push(a);
             } else if let Some(m) = try_mock(call, source) {
                 mocks.push(m);
             } else {
                 // Recurse into callee for chained calls like vi.fn().mockReturnValue()
-                scan_expr(&call.callee, source, assertions, mocks);
+                scan_expr(&call.callee, source, assertions, mocks, context);
             }
         }
         Expression::StaticMemberExpression(member) => {
-            scan_expr(&member.object, source, assertions, mocks);
+            scan_expr(&member.object, source, assertions, mocks, context);
         }
         Expression::AwaitExpression(ae) => {
-            scan_expr(&ae.argument, source, assertions, mocks);
+            scan_expr(&ae.argument, source, assertions, mocks, context);
         }
         _ => {}
     }
 }
 
-fn try_assertion(call: &CallExpression<'_>, source: &str) -> Option<Assertion> {
+fn try_assertion(call: &CallExpression<'_>, source: &str, context: &AssertionContext) -> Option<Assertion> {
     let Expression::StaticMemberExpression(member) = &call.callee else {
         return None;
     };
@@ -261,13 +338,14 @@ fn try_assertion(call: &CallExpression<'_>, source: &str) -> Option<Assertion> {
         target_kind,
         matcher,
         is_weak,
+        context: context.clone(),
     })
 }
 
 fn find_expect_target(expr: &Expression<'_>, source: &str) -> Option<(String, TargetKind)> {
     match expr {
         Expression::CallExpression(call) => {
-            if callee_name(&call.callee) == Some("expect") {
+            if matches!(callee_name(&call.callee), Some(("expect", _))) {
                 let (target, kind) = call
                     .arguments
                     .first()
@@ -707,5 +785,267 @@ describe("outer", () => {
     fn target_kind_paren_unwraps() {
         let blocks = parse(r#"test("x", () => { expect((result)).toBe(1) })"#);
         assert_eq!(blocks[0].assertions[0].target_kind, TargetKind::Identifier);
+    }
+
+    // --- Phase 2: TestModifier ---
+
+    // T-101: test.skip → modifier == Some(Skip)
+    #[test]
+    fn modifier_test_skip() {
+        let blocks = parse(r#"test.skip("x", () => { expect(x).toBe(1) })"#);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].modifier, Some(TestModifier::Skip));
+    }
+
+    // T-102: test.todo → modifier == Some(Todo)
+    #[test]
+    fn modifier_test_todo() {
+        let blocks = parse(r#"test.todo("x")"#);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].modifier, Some(TestModifier::Todo));
+    }
+
+    // T-103: test.only → modifier == Some(Only)
+    #[test]
+    fn modifier_test_only() {
+        let blocks = parse(r#"test.only("x", () => { expect(x).toBe(1) })"#);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].modifier, Some(TestModifier::Only));
+    }
+
+    // T-104: plain test → modifier == None
+    #[test]
+    fn modifier_plain_test() {
+        let blocks = parse(r#"test("x", () => { expect(x).toBe(1) })"#);
+        assert_eq!(blocks[0].modifier, None);
+    }
+
+    // T-105: it.skip → modifier == Some(Skip)
+    #[test]
+    fn modifier_it_skip() {
+        let blocks = parse(r#"it.skip("x", () => { expect(x).toBe(1) })"#);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].modifier, Some(TestModifier::Skip));
+    }
+
+    // --- Phase 2: AssertionContext ---
+
+    // T-106: top-level assertion → TopLevel
+    #[test]
+    fn context_top_level() {
+        let blocks = parse(r#"test("x", () => { expect(x).toBe(1) })"#);
+        assert_eq!(blocks[0].assertions[0].context, AssertionContext::TopLevel);
+    }
+
+    // T-107: assertion inside if → IfBranch
+    #[test]
+    fn context_if_branch() {
+        let source = r#"test("x", () => {
+            if (condition) {
+                expect(x).toBe(1)
+            }
+        })"#;
+        let blocks = parse(source);
+        assert_eq!(blocks[0].assertions[0].context, AssertionContext::IfBranch);
+    }
+
+    // T-108: assertion inside try → TryBlock
+    #[test]
+    fn context_try_block() {
+        let source = r#"test("x", () => {
+            try {
+                expect(x).toBe(1)
+            } catch (e) {}
+        })"#;
+        let blocks = parse(source);
+        assert_eq!(blocks[0].assertions[0].context, AssertionContext::TryBlock);
+    }
+
+    // T-109: assertion inside catch → CatchBlock
+    #[test]
+    fn context_catch_block() {
+        let source = r#"test("x", () => {
+            try {
+                riskyOp()
+            } catch (e) {
+                expect(e.message).toBe("err")
+            }
+        })"#;
+        let blocks = parse(source);
+        assert_eq!(blocks[0].assertions[0].context, AssertionContext::CatchBlock);
+    }
+
+    // T-110: nested if > try > assertion → TryBlock (innermost)
+    #[test]
+    fn context_nested_if_try() {
+        let source = r#"test("x", () => {
+            if (condition) {
+                try {
+                    expect(x).toBe(1)
+                } catch (e) {}
+            }
+        })"#;
+        let blocks = parse(source);
+        assert_eq!(blocks[0].assertions[0].context, AssertionContext::TryBlock);
+    }
+
+    // T-111: nested try > catch > if > assertion → IfBranch (innermost)
+    #[test]
+    fn context_nested_try_catch_if() {
+        let source = r#"test("x", () => {
+            try {
+                riskyOp()
+            } catch (e) {
+                if (e instanceof Error) {
+                    expect(e.message).toBe("err")
+                }
+            }
+        })"#;
+        let blocks = parse(source);
+        assert_eq!(blocks[0].assertions[0].context, AssertionContext::IfBranch);
+    }
+
+    // --- Phase 2: ThrowStatement recognition ---
+
+    // T-112: catch with throw e → no catch_swallow
+    #[test]
+    fn throw_in_catch_no_swallow() {
+        let source = r#"test("x", () => {
+            try {
+                riskyOp()
+            } catch (e) {
+                throw e
+            }
+        })"#;
+        let blocks = parse(source);
+        assert!(blocks[0].catch_swallows.is_empty());
+    }
+
+    // T-113: catch with throw new Error() → no catch_swallow
+    #[test]
+    fn throw_new_in_catch_no_swallow() {
+        let source = r#"test("x", () => {
+            try {
+                riskyOp()
+            } catch (e) {
+                throw new Error("wrapped")
+            }
+        })"#;
+        let blocks = parse(source);
+        assert!(blocks[0].catch_swallows.is_empty());
+    }
+
+    // --- Phase 2: has_empty_body ---
+
+    // T-114: empty body → has_empty_body == true
+    #[test]
+    fn empty_body_detected() {
+        let blocks = parse(r#"test("x", () => {})"#);
+        assert_eq!(blocks.len(), 1);
+        assert!(blocks[0].has_empty_body);
+    }
+
+    // T-115: body with assertion → has_empty_body == false
+    #[test]
+    fn non_empty_body() {
+        let blocks = parse(r#"test("x", () => { expect(x).toBe(1) })"#);
+        assert!(!blocks[0].has_empty_body);
+    }
+
+    // T-116: body with only variable decl → has_empty_body == false
+    #[test]
+    fn body_with_decl_not_empty() {
+        let blocks = parse(r#"test("x", () => { const x = 1 })"#);
+        assert!(!blocks[0].has_empty_body);
+    }
+
+    // --- Phase 2: catch_swallows ---
+
+    // T-117: try-catch, catch empty → catch_swallows has entry
+    #[test]
+    fn catch_swallow_empty_catch() {
+        let source = r#"test("x", () => {
+            try {
+                riskyOp()
+            } catch (e) {}
+        })"#;
+        let blocks = parse(source);
+        assert_eq!(blocks[0].catch_swallows.len(), 1);
+    }
+
+    // T-118: try-catch, catch with assertion → no swallow
+    #[test]
+    fn catch_with_assertion_no_swallow() {
+        let source = r#"test("x", () => {
+            try {
+                riskyOp()
+            } catch (e) {
+                expect(e).toBeDefined()
+            }
+        })"#;
+        let blocks = parse(source);
+        assert!(blocks[0].catch_swallows.is_empty());
+    }
+
+    // T-119: try-catch, catch with throw → no swallow
+    #[test]
+    fn catch_with_throw_no_swallow() {
+        let source = r#"test("x", () => {
+            try {
+                riskyOp()
+            } catch (e) {
+                throw e
+            }
+        })"#;
+        let blocks = parse(source);
+        assert!(blocks[0].catch_swallows.is_empty());
+    }
+
+    // T-120: catch with comment only → swallow (comments are not statements)
+    #[test]
+    fn catch_comment_only_is_swallow() {
+        let source = r#"test("x", () => {
+            try {
+                riskyOp()
+            } catch (e) {
+                // intentionally empty
+            }
+        })"#;
+        let blocks = parse(source);
+        assert_eq!(blocks[0].catch_swallows.len(), 1);
+    }
+
+    // T-121: multiple try-catch, one swallows → catch_swallows.len() == 1
+    #[test]
+    fn multiple_try_catch_one_swallow() {
+        let source = r#"test("x", () => {
+            try { op1() } catch (e) {}
+            try { op2() } catch (e) { throw e }
+        })"#;
+        let blocks = parse(source);
+        assert_eq!(blocks[0].catch_swallows.len(), 1);
+    }
+
+    // T-122: catch with console.log only → swallow
+    #[test]
+    fn catch_console_log_is_swallow() {
+        let source = r#"test("x", () => {
+            try {
+                riskyOp()
+            } catch (e) {
+                console.log(e)
+            }
+        })"#;
+        let blocks = parse(source);
+        assert_eq!(blocks[0].catch_swallows.len(), 1);
+    }
+
+    // T-123: test.todo without callback → has_empty_body == true
+    #[test]
+    fn todo_no_callback_empty_body() {
+        let blocks = parse(r#"test.todo("x")"#);
+        assert_eq!(blocks.len(), 1);
+        assert!(blocks[0].has_empty_body);
+        assert_eq!(blocks[0].modifier, Some(TestModifier::Todo));
     }
 }
