@@ -42,7 +42,7 @@ pub fn check_weak_assertions(blocks: &[TestBlock], file: &Path) -> Vec<Issue> {
                 line: block.line,
                 test_name: block.name.clone(),
                 detail: if block.assertions.is_empty() {
-                    "no assertions".to_string()
+                    "no assertions".to_owned()
                 } else {
                     format!(
                         "only weak: {}",
@@ -113,7 +113,10 @@ pub fn check_mock_only(blocks: &[TestBlock], file: &Path) -> Vec<Issue> {
     let mut issues = Vec::new();
     for block in blocks {
         if !block.assertions.is_empty()
-            && block.assertions.iter().all(|a| MOCK_MATCHERS.contains(&a.matcher.as_str()))
+            && block
+                .assertions
+                .iter()
+                .all(|a| MOCK_MATCHERS.contains(&a.matcher.as_str()))
         {
             let matchers: Vec<&str> = block
                 .assertions
@@ -151,15 +154,18 @@ pub fn check_empty_test(blocks: &[TestBlock], file: &Path) -> Vec<Issue> {
 pub fn check_skipped_test(blocks: &[TestBlock], file: &Path) -> Vec<Issue> {
     let mut issues = Vec::new();
     for block in blocks {
-        if matches!(block.modifier, Some(TestModifier::Skip | TestModifier::Todo)) {
+        if matches!(
+            block.modifier,
+            Some(TestModifier::Skip | TestModifier::Todo)
+        ) {
             issues.push(Issue {
                 rule: "skipped-test",
                 file: file.to_path_buf(),
                 line: block.line,
                 test_name: block.name.clone(),
                 detail: match block.modifier {
-                    Some(TestModifier::Skip) => "skip".to_string(),
-                    Some(TestModifier::Todo) => "todo".to_string(),
+                    Some(TestModifier::Skip) => "skip".to_owned(),
+                    Some(TestModifier::Todo) => "todo".to_owned(),
                     _ => String::new(),
                 },
             });
@@ -177,7 +183,7 @@ pub fn check_catch_swallow(blocks: &[TestBlock], file: &Path) -> Vec<Issue> {
                 file: file.to_path_buf(),
                 line: catch_line,
                 test_name: block.name.clone(),
-                detail: "catch block has no assertions and no throw".to_string(),
+                detail: "catch block has no assertions and no throw".to_owned(),
             });
         }
     }
@@ -389,10 +395,7 @@ mod tests {
             test_name: "test case".into(),
             detail: "".into(),
         };
-        assert_eq!(
-            issue.to_string(),
-            "weak-assertion: test.ts:1 test case"
-        );
+        assert_eq!(issue.to_string(), "weak-assertion: test.ts:1 test case");
     }
 
     fn literal_assertion(target: &str) -> Assertion {
@@ -465,7 +468,10 @@ mod tests {
     #[test]
     fn mock_only_mixed_no_issue() {
         let blocks = vec![block(
-            vec![mock_matcher_assertion("toHaveBeenCalled"), strong_assertion()],
+            vec![
+                mock_matcher_assertion("toHaveBeenCalled"),
+                strong_assertion(),
+            ],
             vec![],
         )];
         let issues = check_mock_only(&blocks, path());
@@ -682,7 +688,10 @@ mod tests {
     // T-210: all assertions IfBranch → conditional-assertion
     #[test]
     fn conditional_assertion_all_if() {
-        let b = block(vec![assertion_with_context(AssertionContext::IfBranch)], vec![]);
+        let b = block(
+            vec![assertion_with_context(AssertionContext::IfBranch)],
+            vec![],
+        );
         let issues = check_conditional_assertion(&[b], path());
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].rule, "conditional-assertion");
@@ -721,7 +730,10 @@ mod tests {
     // T-214: all assertions CatchBlock → catch-only-assertion
     #[test]
     fn catch_only_assertion_detected() {
-        let b = block(vec![assertion_with_context(AssertionContext::CatchBlock)], vec![]);
+        let b = block(
+            vec![assertion_with_context(AssertionContext::CatchBlock)],
+            vec![],
+        );
         let issues = check_catch_only_assertion(&[b], path());
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].rule, "catch-only-assertion");

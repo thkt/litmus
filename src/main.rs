@@ -1,9 +1,10 @@
 use litmus::{analyze_files, find_test_files};
+use std::env;
 use std::path::Path;
 use std::process;
 
 fn main() {
-    let dir = std::env::args().nth(1).unwrap_or_else(|| ".".to_string());
+    let dir = env::args().nth(1).unwrap_or_else(|| ".".to_owned());
     let dir = Path::new(&dir);
 
     let files = find_test_files(dir);

@@ -1,5 +1,5 @@
 use oxc_allocator::Allocator;
-use oxc_ast::ast::*;
+use oxc_ast::ast::{Argument, CallExpression, Expression, FunctionBody, Statement, TryStatement};
 use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType};
 use std::path::Path;
@@ -11,7 +11,7 @@ pub enum TestModifier {
     Only,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AssertionContext {
     TopLevel,
     IfBranch,
@@ -68,15 +68,15 @@ const WEAK_MATCHERS: &[&str] = &["toBeTruthy", "toBeDefined", "toBeFalsy"];
 
 pub fn parse_test_file(source: &str, path: &Path) -> Result<Vec<TestBlock>, String> {
     let allocator = Allocator::default();
-    let source_type = SourceType::from_path(path)
-        .unwrap_or_else(|_| SourceType::from_path("test.ts").unwrap());
+    let source_type =
+        SourceType::from_path(path).unwrap_or_else(|_| SourceType::from_path("test.ts").unwrap());
     let ret = Parser::new(&allocator, source, source_type).parse();
 
     if !ret.errors.is_empty() {
         let msg = ret
             .errors
             .iter()
-            .map(|e| e.to_string())
+            .map(ToString::to_string)
             .collect::<Vec<_>>()
             .join("; ");
         return Err(msg);
@@ -236,35 +236,98 @@ fn scan_statement(
             }
         }
         Statement::BlockStatement(bs) => {
-            scan_body(&bs.body, source, assertions, mocks, catch_swallows, context.clone());
+            scan_body(
+                &bs.body,
+                source,
+                assertions,
+                mocks,
+                catch_swallows,
+                *context,
+            );
         }
         Statement::IfStatement(if_stmt) => {
-            scan_statement(&if_stmt.consequent, source, assertions, mocks, catch_swallows, &AssertionContext::IfBranch);
+            scan_statement(
+                &if_stmt.consequent,
+                source,
+                assertions,
+                mocks,
+                catch_swallows,
+                &AssertionContext::IfBranch,
+            );
             if let Some(alt) = &if_stmt.alternate {
-                scan_statement(alt, source, assertions, mocks, catch_swallows, &AssertionContext::IfBranch);
+                scan_statement(
+                    alt,
+                    source,
+                    assertions,
+                    mocks,
+                    catch_swallows,
+                    &AssertionContext::IfBranch,
+                );
             }
         }
         Statement::ForStatement(for_stmt) => {
-            scan_statement(&for_stmt.body, source, assertions, mocks, catch_swallows, context);
+            scan_statement(
+                &for_stmt.body,
+                source,
+                assertions,
+                mocks,
+                catch_swallows,
+                context,
+            );
         }
         Statement::ForInStatement(for_in) => {
-            scan_statement(&for_in.body, source, assertions, mocks, catch_swallows, context);
+            scan_statement(
+                &for_in.body,
+                source,
+                assertions,
+                mocks,
+                catch_swallows,
+                context,
+            );
         }
         Statement::ForOfStatement(for_of) => {
-            scan_statement(&for_of.body, source, assertions, mocks, catch_swallows, context);
+            scan_statement(
+                &for_of.body,
+                source,
+                assertions,
+                mocks,
+                catch_swallows,
+                context,
+            );
         }
         Statement::WhileStatement(while_stmt) => {
-            scan_statement(&while_stmt.body, source, assertions, mocks, catch_swallows, context);
+            scan_statement(
+                &while_stmt.body,
+                source,
+                assertions,
+                mocks,
+                catch_swallows,
+                context,
+            );
         }
         Statement::DoWhileStatement(do_while) => {
-            scan_statement(&do_while.body, source, assertions, mocks, catch_swallows, context);
+            scan_statement(
+                &do_while.body,
+                source,
+                assertions,
+                mocks,
+                catch_swallows,
+                context,
+            );
         }
         Statement::TryStatement(try_stmt) => {
             scan_try_statement(try_stmt, source, assertions, mocks, catch_swallows, context);
         }
         Statement::SwitchStatement(switch_stmt) => {
             for case in &switch_stmt.cases {
-                scan_body(&case.consequent, source, assertions, mocks, catch_swallows, context.clone());
+                scan_body(
+                    &case.consequent,
+                    source,
+                    assertions,
+                    mocks,
+                    catch_swallows,
+                    *context,
+                );
             }
         }
         _ => {}
@@ -279,7 +342,14 @@ fn scan_try_statement(
     catch_swallows: &mut Vec<u32>,
     context: &AssertionContext,
 ) {
-    scan_body(&try_stmt.block.body, source, assertions, mocks, catch_swallows, AssertionContext::TryBlock);
+    scan_body(
+        &try_stmt.block.body,
+        source,
+        assertions,
+        mocks,
+        catch_swallows,
+        AssertionContext::TryBlock,
+    );
 
     if let Some(handler) = &try_stmt.handler {
         if handler.body.body.is_empty() {
@@ -287,10 +357,21 @@ fn scan_try_statement(
         } else {
             let mut catch_assertions = Vec::new();
             for catch_stmt in &handler.body.body {
-                scan_statement(catch_stmt, source, &mut catch_assertions, mocks, catch_swallows, &AssertionContext::CatchBlock);
+                scan_statement(
+                    catch_stmt,
+                    source,
+                    &mut catch_assertions,
+                    mocks,
+                    catch_swallows,
+                    &AssertionContext::CatchBlock,
+                );
             }
             if catch_assertions.is_empty()
-                && !handler.body.body.iter().any(|s| matches!(s, Statement::ThrowStatement(_)))
+                && !handler
+                    .body
+                    .body
+                    .iter()
+                    .any(|s| matches!(s, Statement::ThrowStatement(_)))
             {
                 catch_swallows.push(offset_to_line(source, handler.span.start));
             }
@@ -299,7 +380,14 @@ fn scan_try_statement(
     }
 
     if let Some(finalizer) = &try_stmt.finalizer {
-        scan_body(&finalizer.body, source, assertions, mocks, catch_swallows, context.clone());
+        scan_body(
+            &finalizer.body,
+            source,
+            assertions,
+            mocks,
+            catch_swallows,
+            *context,
+        );
     }
 }
 
@@ -331,7 +419,11 @@ fn scan_expr(
     }
 }
 
-fn try_assertion(call: &CallExpression<'_>, source: &str, context: &AssertionContext) -> Option<Assertion> {
+fn try_assertion(
+    call: &CallExpression<'_>,
+    source: &str,
+    context: &AssertionContext,
+) -> Option<Assertion> {
     let Expression::StaticMemberExpression(member) = &call.callee else {
         return None;
     };
@@ -347,7 +439,7 @@ fn try_assertion(call: &CallExpression<'_>, source: &str, context: &AssertionCon
         target_kind,
         matcher,
         is_weak,
-        context: context.clone(),
+        context: *context,
     })
 }
 
@@ -359,7 +451,7 @@ fn find_expect_target(expr: &Expression<'_>, source: &str) -> Option<(String, Ta
                     .arguments
                     .first()
                     .map(|arg| {
-                        let text = arg.span().source_text(source).to_string();
+                        let text = arg.span().source_text(source).to_owned();
                         let kind = classify_argument(arg);
                         (text, kind)
                     })
@@ -369,9 +461,7 @@ fn find_expect_target(expr: &Expression<'_>, source: &str) -> Option<(String, Ta
                 None
             }
         }
-        Expression::StaticMemberExpression(member) => {
-            find_expect_target(&member.object, source)
-        }
+        Expression::StaticMemberExpression(member) => find_expect_target(&member.object, source),
         _ => None,
     }
 }
@@ -429,11 +519,8 @@ fn try_mock(call: &CallExpression<'_>, source: &str) -> Option<MockCall> {
 
 fn offset_to_line(source: &str, offset: u32) -> u32 {
     let end = (offset as usize).min(source.len());
-    source[..end]
-        .bytes()
-        .filter(|&b| b == b'\n')
-        .count() as u32
-        + 1
+    let count = source[..end].bytes().filter(|&b| b == b'\n').count();
+    u32::try_from(count).unwrap_or(u32::MAX).saturating_add(1)
 }
 
 #[cfg(test)]
@@ -575,10 +662,7 @@ describe("outer", () => {
         for matcher in ["toBeTruthy", "toBeDefined", "toBeFalsy"] {
             let source = format!(r#"test("x", () => {{ expect(x).{matcher}() }})"#);
             let blocks = parse(&source);
-            assert!(
-                blocks[0].assertions[0].is_weak,
-                "{matcher} should be weak"
-            );
+            assert!(blocks[0].assertions[0].is_weak, "{matcher} should be weak");
         }
     }
 
@@ -694,8 +778,7 @@ describe("outer", () => {
     // TC-005: .rejects modifier handled
     #[test]
     fn handles_rejects_modifier() {
-        let source =
-            r#"test("x", async () => { await expect(badCall()).rejects.toThrow("err") })"#;
+        let source = r#"test("x", async () => { await expect(badCall()).rejects.toThrow("err") })"#;
         let blocks = parse(source);
         assert_eq!(blocks[0].assertions.len(), 1);
         assert_eq!(blocks[0].assertions[0].matcher, "toThrow");
@@ -721,15 +804,42 @@ describe("outer", () => {
     #[test]
     fn target_kind_classification() {
         let cases: Vec<(&str, TargetKind)> = vec![
-            (r#"test("x", () => { expect(true).toBe(true) })"#, TargetKind::Literal),
-            (r#"test("x", () => { expect(42).toBe(42) })"#, TargetKind::Literal),
-            (r#"test("x", () => { expect("hello").toEqual("hello") })"#, TargetKind::Literal),
-            (r#"test("x", () => { expect(null).toBeNull() })"#, TargetKind::Literal),
-            (r#"test("x", () => { expect(result).toBe(42) })"#, TargetKind::Identifier),
-            (r#"test("x", () => { expect(fetchUser(1)).toBe(42) })"#, TargetKind::CallResult),
-            (r#"test("x", () => { expect(obj.prop).toBe(42) })"#, TargetKind::Other),
-            (r#"test("x", async () => { expect(await fn()).toBe(1) })"#, TargetKind::CallResult),
-            (r#"test("x", () => { expect((result)).toBe(1) })"#, TargetKind::Identifier),
+            (
+                r#"test("x", () => { expect(true).toBe(true) })"#,
+                TargetKind::Literal,
+            ),
+            (
+                r#"test("x", () => { expect(42).toBe(42) })"#,
+                TargetKind::Literal,
+            ),
+            (
+                r#"test("x", () => { expect("hello").toEqual("hello") })"#,
+                TargetKind::Literal,
+            ),
+            (
+                r#"test("x", () => { expect(null).toBeNull() })"#,
+                TargetKind::Literal,
+            ),
+            (
+                r#"test("x", () => { expect(result).toBe(42) })"#,
+                TargetKind::Identifier,
+            ),
+            (
+                r#"test("x", () => { expect(fetchUser(1)).toBe(42) })"#,
+                TargetKind::CallResult,
+            ),
+            (
+                r#"test("x", () => { expect(obj.prop).toBe(42) })"#,
+                TargetKind::Other,
+            ),
+            (
+                r#"test("x", async () => { expect(await fn()).toBe(1) })"#,
+                TargetKind::CallResult,
+            ),
+            (
+                r#"test("x", () => { expect((result)).toBe(1) })"#,
+                TargetKind::Identifier,
+            ),
         ];
         for (source, expected) in cases {
             let blocks = parse(source);
@@ -821,7 +931,10 @@ describe("outer", () => {
             }
         })"#;
         let blocks = parse(source);
-        assert_eq!(blocks[0].assertions[0].context, AssertionContext::CatchBlock);
+        assert_eq!(
+            blocks[0].assertions[0].context,
+            AssertionContext::CatchBlock
+        );
     }
 
     // T-110: nested if > try > assertion → TryBlock (innermost)

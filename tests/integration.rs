@@ -1,8 +1,9 @@
 use std::fs;
-use std::process::Command;
+use std::path::Path;
+use std::process::{Command, Output};
 use tempfile::TempDir;
 
-fn litmus(dir: &std::path::Path) -> std::process::Output {
+fn litmus(dir: &Path) -> Output {
     Command::new(env!("CARGO_BIN_EXE_litmus"))
         .arg(dir)
         .output()
@@ -92,8 +93,7 @@ fn parse_error_skipped_others_processed() {
     )
     .unwrap();
 
-    fs::write(dir.path().join("broken.test.ts"), "@@@ not javascript $$$")
-        .unwrap();
+    fs::write(dir.path().join("broken.test.ts"), "@@@ not javascript $$$").unwrap();
 
     let output = litmus(dir.path());
 
@@ -169,7 +169,11 @@ fn excludes_node_modules() {
     .unwrap();
 
     let output = litmus(dir.path());
-    assert_eq!(output.status.code(), Some(0), "node_modules should be excluded");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "node_modules should be excluded"
+    );
 
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.is_empty(), "no output expected: {stdout}");
@@ -315,10 +319,7 @@ fn detects_conditional_assertion() {
     assert_eq!(output.status.code(), Some(1));
 
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(
-        stdout.contains("conditional-assertion"),
-        "stdout: {stdout}"
-    );
+    assert!(stdout.contains("conditional-assertion"), "stdout: {stdout}");
 }
 
 // T-305: all assertions in catch → catch-only-assertion
@@ -341,10 +342,7 @@ fn detects_catch_only_assertion() {
     assert_eq!(output.status.code(), Some(1));
 
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(
-        stdout.contains("catch-only-assertion"),
-        "stdout: {stdout}"
-    );
+    assert!(stdout.contains("catch-only-assertion"), "stdout: {stdout}");
 }
 
 // T-306: empty body → empty-test only (no weak-assertion)
@@ -361,7 +359,10 @@ fn empty_test_suppresses_weak_assertion() {
     assert_eq!(output.status.code(), Some(1));
 
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("empty-test"), "should have empty-test: {stdout}");
+    assert!(
+        stdout.contains("empty-test"),
+        "should have empty-test: {stdout}"
+    );
     assert!(
         !stdout.contains("weak-assertion"),
         "should NOT have weak-assertion: {stdout}"
@@ -409,5 +410,8 @@ fn comment_only_body_is_empty() {
     assert_eq!(output.status.code(), Some(1));
 
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("empty-test"), "should have empty-test: {stdout}");
+    assert!(
+        stdout.contains("empty-test"),
+        "should have empty-test: {stdout}"
+    );
 }

@@ -3,11 +3,12 @@ pub mod rules;
 
 use parse::parse_test_file;
 use rules::{
-    check_catch_only_assertion, check_catch_swallow, check_conditional_assertion,
-    check_empty_test, check_mock_only, check_mock_overuse, check_skipped_test,
-    check_tautological, check_test_name, check_weak_assertions, Issue,
+    Issue, check_catch_only_assertion, check_catch_swallow, check_conditional_assertion,
+    check_empty_test, check_mock_only, check_mock_overuse, check_skipped_test, check_tautological,
+    check_test_name, check_weak_assertions,
 };
 use std::fmt;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 const EXCLUDED_DIRS: &[&str] = &["node_modules", ".git", "dist", "build", "target"];
@@ -31,7 +32,12 @@ impl fmt::Display for FileError {
             FileErrorKind::Read => "read error",
             FileErrorKind::Parse => "parse error",
         };
-        write!(f, "litmus: {kind}: {}: {}", self.file.display(), self.message)
+        write!(
+            f,
+            "litmus: {kind}: {}: {}",
+            self.file.display(),
+            self.message
+        )
     }
 }
 
@@ -41,10 +47,7 @@ pub struct AnalysisResult {
 }
 
 pub fn find_test_files(dir: &Path) -> Vec<PathBuf> {
-    let patterns = [
-        dir.join("**/*.test.ts"),
-        dir.join("**/*.test.tsx"),
-    ];
+    let patterns = [dir.join("**/*.test.ts"), dir.join("**/*.test.tsx")];
 
     let mut files = Vec::new();
     for pattern in &patterns {
@@ -72,7 +75,7 @@ pub fn analyze_files(files: &[PathBuf]) -> AnalysisResult {
     let mut errors = Vec::new();
 
     for file in files {
-        let source = match std::fs::read_to_string(file) {
+        let source = match fs::read_to_string(file) {
             Ok(s) => s,
             Err(e) => {
                 errors.push(FileError {
