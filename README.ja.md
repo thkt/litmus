@@ -54,7 +54,17 @@ mock-only: src/api.test.ts:42 fetches users (matchers: toHaveBeenCalledWith, toH
 test-name-quality: src/utils.test.ts:8 works (words: 1)
 ```
 
-終了コード0 = クリーン。終了コード1 = issueあり。
+#### 終了コード
+
+| Code | 意味                                            |
+| ---- | ----------------------------------------------- |
+| 0    | クリーン (違反なし)                             |
+| 1    | 予約 (将来の warn レベルルール用)               |
+| 2    | issue 検出                                      |
+| 64   | usage エラー (CLI 引数が不正)                   |
+| 70   | 内部エラー (panic / invariant violation)        |
+
+64 と 70 は [sysexits.h](https://man.openbsd.org/sysexits.3) 準拠、0/1/2 は hook ツールの慣例 (pass / warn / block)。現状 litmus は違反検出時に常に 2 を返し、1 は将来の warn レベルルール用に予約。
 
 #### インストール
 

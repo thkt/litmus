@@ -13,6 +13,51 @@ use std::path::{Path, PathBuf};
 
 const EXCLUDED_DIRS: &[&str] = &["node_modules", ".git", "dist", "build", "target"];
 
+// Exit codes per ADR-0066 Group 3 (Hook tool).
+//
+// Adopted:
+//   0  EX_OK         clean (no violations)
+//   1  (reserved)    advisory; reserved for future warn-level rules
+//   2  (convention)  blocking failure (violations detected)
+//   64 EX_USAGE      bad command-line usage
+//   70 EX_SOFTWARE   internal error (panic / invariant violation)
+//
+// Not adopted (ADR-0066 Confirmation requires reasons):
+//   65 EX_DATAERR    input is a dir path only; no malformed-data concept
+//   73 EX_CANTCREAT  litmus does not create output files
+//   74 EX_IOERR      per-file read errors are reported to stderr and skipped;
+//                    no aggregate IO-failure exit
+//   75 EX_TEMPFAIL   no retryable failure mode (local, deterministic analysis)
+//   104 UNKNOWN      anyhow::Error swallow fallback; litmus does not use anyhow
+pub const EXIT_SUCCESS: u8 = 0;
+pub const EXIT_BLOCKING: u8 = 2;
+pub const EXIT_USAGE: u8 = 64;
+pub const EXIT_SOFTWARE: u8 = 70;
+
+#[derive(Debug)]
+pub enum LitmusError {
+    Usage(String),
+    Internal(String),
+}
+
+impl LitmusError {
+    pub fn exit_code(&self) -> u8 {
+        match self {
+            LitmusError::Usage(_) => EXIT_USAGE,
+            LitmusError::Internal(_) => EXIT_SOFTWARE,
+        }
+    }
+}
+
+impl fmt::Display for LitmusError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LitmusError::Usage(msg) => write!(f, "litmus: usage error: {msg}"),
+            LitmusError::Internal(msg) => write!(f, "litmus: internal error: {msg}"),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct FileError {
     pub file: PathBuf,
@@ -112,4 +157,49 @@ pub fn analyze_files(files: &[PathBuf]) -> AnalysisResult {
     }
 
     AnalysisResult { issues, errors }
+}
+
+#[cfg(test)]
+mod error_tests {
+    use super::{EXIT_BLOCKING, EXIT_SOFTWARE, EXIT_SUCCESS, EXIT_USAGE, LitmusError};
+
+    // T-401: ADR-0066 Group 3 exit code constants
+    #[test]
+    fn exit_codes_pinned_to_adr_0066_group_3() {
+        assert_eq!(EXIT_SUCCESS, 0);
+        assert_eq!(EXIT_BLOCKING, 2);
+        assert_eq!(EXIT_USAGE, 64);
+        assert_eq!(EXIT_SOFTWARE, 70);
+    }
+
+    // T-402: Usage variant maps to 64
+    #[test]
+    fn usage_exit_code_is_64() {
+        let e = LitmusError::Usage("too many args".to_owned());
+        assert_eq!(e.exit_code(), EXIT_USAGE);
+    }
+
+    // T-403: Internal variant maps to 70
+    #[test]
+    fn internal_exit_code_is_70() {
+        let e = LitmusError::Internal("invariant violated".to_owned());
+        assert_eq!(e.exit_code(), EXIT_SOFTWARE);
+    }
+
+    // T-404: Display includes the underlying message
+    #[test]
+    fn display_usage_includes_message() {
+        let e = LitmusError::Usage("unknown flag --foo".to_owned());
+        assert_eq!(e.to_string(), "litmus: usage error: unknown flag --foo");
+    }
+
+    // T-405: Display distinguishes internal from usage
+    #[test]
+    fn display_internal_includes_message() {
+        let e = LitmusError::Internal("invariant: empty path".to_owned());
+        assert_eq!(
+            e.to_string(),
+            "litmus: internal error: invariant: empty path"
+        );
+    }
 }

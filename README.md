@@ -54,7 +54,17 @@ mock-only: src/api.test.ts:42 fetches users (matchers: toHaveBeenCalledWith, toH
 test-name-quality: src/utils.test.ts:8 works (words: 1)
 ```
 
-Exit code 0 = clean. Exit code 1 = issues found.
+#### Exit codes
+
+| Code | Meaning                                          |
+| ---- | ------------------------------------------------ |
+| 0    | clean (no violations)                            |
+| 1    | reserved (future warn-level rules)               |
+| 2    | issues found                                     |
+| 64   | usage error (invalid CLI arguments)              |
+| 70   | internal error (panic / invariant violation)     |
+
+Codes 64 and 70 follow [sysexits.h](https://man.openbsd.org/sysexits.3) conventions; codes 0/1/2 follow the hook-tool convention (pass / warn / block). litmus currently emits 2 for any detected violation; 1 is reserved for future warn-level rules.
 
 #### Installation
 
