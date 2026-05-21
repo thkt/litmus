@@ -3,16 +3,20 @@ use std::path::Path;
 use std::process::{Command, Output};
 use tempfile::TempDir;
 
-fn litmus(dir: &Path) -> Output {
+fn litmus_cmd() -> Command {
     Command::new(env!("CARGO_BIN_EXE_litmus"))
+}
+
+fn litmus(dir: &Path) -> Output {
+    litmus_cmd()
         .arg(dir)
         .output()
         .expect("failed to run litmus")
 }
 
-// T-015: issues present → exit 1 + stdout has file path and line number
+// T-015: issues present → exit 2 + stdout has file path and line number
 #[test]
-fn exit_1_with_issues() {
+fn exit_2_with_issues() {
     let dir = TempDir::new().unwrap();
     fs::write(
         dir.path().join("weak.test.ts"),
@@ -21,7 +25,7 @@ fn exit_1_with_issues() {
     .unwrap();
 
     let output = litmus(dir.path());
-    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.status.code(), Some(2));
 
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("weak-assertion"), "stdout: {stdout}");
@@ -31,7 +35,7 @@ fn exit_1_with_issues() {
 
 // T-015 variant: mock overuse also reported
 #[test]
-fn exit_1_mock_overuse() {
+fn exit_2_mock_overuse() {
     let dir = TempDir::new().unwrap();
     fs::write(
         dir.path().join("mocks.test.ts"),
@@ -45,7 +49,7 @@ fn exit_1_mock_overuse() {
     .unwrap();
 
     let output = litmus(dir.path());
-    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.status.code(), Some(2));
 
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("mock-overuse"), "stdout: {stdout}");
@@ -121,7 +125,7 @@ fn tsx_files_detected() {
     .unwrap();
 
     let output = litmus(dir.path());
-    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.status.code(), Some(2));
 
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("comp.test.tsx"), "stdout: {stdout}");
@@ -198,14 +202,14 @@ test("mock only", () => {
     .unwrap();
 
     let output = litmus(dir.path());
-    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.status.code(), Some(2));
 
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("tautological"), "stdout: {stdout}");
     assert!(stdout.contains("mock-only"), "stdout: {stdout}");
 }
 
-// T-052: short test name → exit 1 with test-name-quality
+// T-052: short test name → exit 2 with test-name-quality
 #[test]
 fn test_name_quality_short_name_detected() {
     let dir = TempDir::new().unwrap();
@@ -218,7 +222,7 @@ fn test_name_quality_short_name_detected() {
     .unwrap();
 
     let output = litmus(dir.path());
-    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.status.code(), Some(2));
 
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("test-name-quality"), "stdout: {stdout}");
@@ -253,7 +257,7 @@ fn detects_empty_test() {
     .unwrap();
 
     let output = litmus(dir.path());
-    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.status.code(), Some(2));
 
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("empty-test"), "stdout: {stdout}");
@@ -272,7 +276,7 @@ fn detects_skipped_test() {
     .unwrap();
 
     let output = litmus(dir.path());
-    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.status.code(), Some(2));
 
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("skipped-test"), "stdout: {stdout}");
@@ -294,7 +298,7 @@ fn detects_catch_swallow() {
     .unwrap();
 
     let output = litmus(dir.path());
-    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.status.code(), Some(2));
 
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("catch-swallow"), "stdout: {stdout}");
@@ -316,7 +320,7 @@ fn detects_conditional_assertion() {
     .unwrap();
 
     let output = litmus(dir.path());
-    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.status.code(), Some(2));
 
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("conditional-assertion"), "stdout: {stdout}");
@@ -339,7 +343,7 @@ fn detects_catch_only_assertion() {
     .unwrap();
 
     let output = litmus(dir.path());
-    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.status.code(), Some(2));
 
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("catch-only-assertion"), "stdout: {stdout}");
@@ -356,7 +360,7 @@ fn empty_test_suppresses_weak_assertion() {
     .unwrap();
 
     let output = litmus(dir.path());
-    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.status.code(), Some(2));
 
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(
@@ -407,11 +411,108 @@ fn comment_only_body_is_empty() {
     .unwrap();
 
     let output = litmus(dir.path());
-    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.status.code(), Some(2));
 
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(
         stdout.contains("empty-test"),
         "should have empty-test: {stdout}"
+    );
+}
+
+// T-410: usage error - 2+ positional args → exit 64
+#[test]
+fn bad_usage_too_many_positional_args() {
+    let dir1 = TempDir::new().unwrap();
+    let dir2 = TempDir::new().unwrap();
+
+    let output = litmus_cmd()
+        .arg(dir1.path())
+        .arg(dir2.path())
+        .output()
+        .expect("failed to run litmus");
+
+    assert_eq!(output.status.code(), Some(64));
+
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("usage error"),
+        "stderr should label usage error: {stderr}"
+    );
+}
+
+// T-411: usage error - unknown flag → exit 64
+#[test]
+fn bad_usage_unknown_flag() {
+    let output = litmus_cmd()
+        .arg("--unknown")
+        .output()
+        .expect("failed to run litmus");
+
+    assert_eq!(output.status.code(), Some(64));
+
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("unknown flag"),
+        "stderr should mention unknown flag: {stderr}"
+    );
+}
+
+// T-412: panic inside run() → catch_unwind maps to exit 70 (EX_SOFTWARE).
+// The LITMUS_FORCE_PANIC env var path is gated by `#[cfg(debug_assertions)]`
+// in `main.rs`, so this test is likewise gated — under `cargo test --release`
+// the env var is ignored and the assertion would falsely fail.
+#[cfg(debug_assertions)]
+#[test]
+fn internal_error_panic_returns_70() {
+    let dir = TempDir::new().unwrap();
+
+    let output = litmus_cmd()
+        .arg(dir.path())
+        .env("LITMUS_FORCE_PANIC", "1")
+        .output()
+        .expect("failed to run litmus");
+
+    assert_eq!(
+        output.status.code(),
+        Some(70),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("litmus: internal error"),
+        "stderr should include the litmus internal-error prefix: {stderr}"
+    );
+}
+
+// T-413: ADR-0066 Group 3 — standalone CLI and hook-spawned invocations must
+// produce identical exit codes. Spawn via `sh -c` to simulate the gates/hook
+// embedding path.
+#[test]
+fn spawned_via_sh_wrapper_matches_direct_exit_code() {
+    let dir = TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("weak.test.ts"),
+        r#"test("weak only", () => { expect(x).toBeTruthy() })"#,
+    )
+    .unwrap();
+
+    let direct = litmus(dir.path());
+    assert_eq!(direct.status.code(), Some(2));
+
+    let wrapped = Command::new("sh")
+        .arg("-c")
+        .arg(r#""$0" "$1""#)
+        .arg(env!("CARGO_BIN_EXE_litmus"))
+        .arg(dir.path())
+        .output()
+        .expect("failed to spawn via sh");
+
+    assert_eq!(
+        wrapped.status.code(),
+        direct.status.code(),
+        "wrapped exit code should match direct invocation"
     );
 }
