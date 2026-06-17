@@ -5,3 +5,7 @@
 docs/
 target/
 workspace/
+
+# Coverage artifacts
+*.profraw
+/lcov.info
