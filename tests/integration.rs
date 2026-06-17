@@ -516,3 +516,25 @@ fn spawned_via_sh_wrapper_matches_direct_exit_code() {
         "wrapped exit code should match direct invocation"
     );
 }
+
+// T-247: arrange-only body (local data + strong assertion, no SUT call) →
+// missing-act at warning severity, exit 1.
+#[test]
+fn exit_1_missing_act() {
+    let dir = TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("noact.test.ts"),
+        r#"test("computes the discounted total", () => {
+    const total = 42
+    expect(total).toBe(42)
+})"#,
+    )
+    .unwrap();
+
+    let output = litmus(dir.path());
+    assert_eq!(output.status.code(), Some(1));
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("missing-act"), "stdout: {stdout}");
+    assert!(stdout.contains("noact.test.ts:1"), "stdout: {stdout}");
+}

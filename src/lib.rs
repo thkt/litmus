@@ -4,8 +4,8 @@ pub mod rules;
 use parse::parse_test_file;
 use rules::{
     Issue, check_catch_only_assertion, check_catch_swallow, check_conditional_assertion,
-    check_dummy_data, check_empty_test, check_mock_only, check_mock_overuse, check_skipped_test,
-    check_tautological, check_test_name, check_weak_assertions,
+    check_dummy_data, check_empty_test, check_missing_act, check_mock_only, check_mock_overuse,
+    check_skipped_test, check_tautological, check_test_name, check_weak_assertions,
 };
 use std::fmt;
 use std::fs;
@@ -156,6 +156,7 @@ pub fn analyze_files(files: &[PathBuf]) -> AnalysisResult {
         issues.extend(check_mock_only(&blocks, file));
         issues.extend(check_test_name(&blocks, file));
         issues.extend(check_dummy_data(&blocks, file));
+        issues.extend(check_missing_act(&blocks, file));
     }
 
     AnalysisResult { issues, errors }

@@ -1,7 +1,8 @@
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
-    Argument, ArrayExpression, ArrayExpressionElement, CallExpression, Expression, FunctionBody,
-    ObjectExpression, ObjectPropertyKind, Statement, StringLiteral, TryStatement,
+    Argument, ArrayExpression, ArrayExpressionElement, BindingPattern, CallExpression,
+    ChainElement, Expression, FunctionBody, ObjectExpression, ObjectPropertyKind, Statement,
+    StringLiteral, TryStatement,
 };
 use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType};
@@ -30,6 +31,14 @@ pub struct TestBlock {
     pub mock_calls: Vec<MockCall>,
     pub modifier: Option<TestModifier>,
     pub has_empty_body: bool,
+    /// Whether the body invokes production code (the "Act" step of AAA). False
+    /// when the test only arranges data and asserts on it, with no SUT call.
+    pub has_act: bool,
+    /// Names the body binds locally (the "Arrange" step), e.g. `x` in
+    /// `const x = 42`. missing-act fires only when an assertion targets one of
+    /// these names with no Act, separating data arranged-and-asserted in the
+    /// body from data whose arrange/act lives in setup hooks.
+    pub bound_names: Vec<String>,
     pub catch_swallows: Vec<u32>,
     pub dummy_literals: Vec<DummyLiteral>,
 }
@@ -55,6 +64,9 @@ pub struct Assertion {
     pub line: u32,
     pub target: String,
     pub target_kind: TargetKind,
+    /// Root identifier of the assertion target, e.g. `user` in
+    /// `expect(user.name)`. None when the target is a literal or call result.
+    pub target_root: Option<String>,
     pub matcher: String,
     pub is_weak: bool,
     pub context: AssertionContext,
@@ -138,6 +150,8 @@ fn check_test_call(expr: &Expression<'_>, source: &str, blocks: &mut Vec<TestBlo
                         mock_calls: Vec::new(),
                         modifier: Some(TestModifier::Todo),
                         has_empty_body: true,
+                        has_act: false,
+                        bound_names: Vec::new(),
                         catch_swallows: Vec::new(),
                         dummy_literals: Vec::new(),
                     });
@@ -177,6 +191,8 @@ fn extract_test_block(call: &CallExpression<'_>, source: &str) -> Option<TestBlo
     let body = callback_body(&call.arguments)?;
     let line = offset_to_line(source, call.span.start);
     let has_empty_body = body.statements.is_empty();
+    let has_act = body_has_act(&body.statements);
+    let bound_names = body_bound_names(&body.statements);
 
     let mut assertions = Vec::new();
     let mut mock_calls = Vec::new();
@@ -199,6 +215,8 @@ fn extract_test_block(call: &CallExpression<'_>, source: &str) -> Option<TestBlo
         mock_calls,
         modifier: None,
         has_empty_body,
+        has_act,
+        bound_names,
         catch_swallows,
         dummy_literals,
     })
@@ -573,7 +591,7 @@ fn try_assertion(
         return None;
     };
 
-    let (target, target_kind) = find_expect_target(&member.object, source)?;
+    let (target, target_kind, target_root) = find_expect_target(&member.object, source)?;
     let matcher = member.property.name.to_string();
     let is_weak = WEAK_MATCHERS.contains(&matcher.as_str());
     let line = offset_to_line(source, call.span.start);
@@ -582,31 +600,51 @@ fn try_assertion(
         line,
         target,
         target_kind,
+        target_root,
         matcher,
         is_weak,
         context: *context,
     })
 }
 
-fn find_expect_target(expr: &Expression<'_>, source: &str) -> Option<(String, TargetKind)> {
+fn find_expect_target(
+    expr: &Expression<'_>,
+    source: &str,
+) -> Option<(String, TargetKind, Option<String>)> {
     match expr {
         Expression::CallExpression(call) => {
             if matches!(callee_name(&call.callee), Some(("expect", _))) {
-                let (target, kind) = call
+                let result = call
                     .arguments
                     .first()
                     .map(|arg| {
                         let text = arg.span().source_text(source).to_owned();
                         let kind = classify_argument(arg);
-                        (text, kind)
+                        let root = arg.as_expression().and_then(expr_root_ident);
+                        (text, kind, root)
                     })
-                    .unwrap_or_else(|| (String::new(), TargetKind::Other));
-                Some((target, kind))
+                    .unwrap_or_else(|| (String::new(), TargetKind::Other, None));
+                Some(result)
             } else {
                 None
             }
         }
         Expression::StaticMemberExpression(member) => find_expect_target(&member.object, source),
+        _ => None,
+    }
+}
+
+/// Resolves the root identifier an expression reads from, e.g. `user` in
+/// `user.profile.name` or `items[0]`. Returns None for non-reference roots
+/// (call results, literals, `this`) where no single source binding applies.
+fn expr_root_ident(expr: &Expression<'_>) -> Option<String> {
+    match expr {
+        Expression::Identifier(id) => Some(id.name.to_string()),
+        Expression::StaticMemberExpression(m) => expr_root_ident(&m.object),
+        Expression::ComputedMemberExpression(m) => expr_root_ident(&m.object),
+        Expression::ParenthesizedExpression(p) => expr_root_ident(&p.expression),
+        Expression::TSNonNullExpression(e) => expr_root_ident(&e.expression),
+        Expression::TSAsExpression(e) => expr_root_ident(&e.expression),
         _ => None,
     }
 }
@@ -640,7 +678,13 @@ fn classify_expression(expr: &Expression<'_>) -> TargetKind {
 }
 
 fn try_mock(call: &CallExpression<'_>, source: &str) -> Option<MockCall> {
-    let kind = match &call.callee {
+    let kind = mock_kind(call)?;
+    let line = offset_to_line(source, call.span.start);
+    Some(MockCall { line, kind })
+}
+
+fn mock_kind(call: &CallExpression<'_>) -> Option<MockKind> {
+    match &call.callee {
         Expression::StaticMemberExpression(member) => {
             let Expression::Identifier(obj) = &member.object else {
                 return None;
@@ -649,17 +693,248 @@ fn try_mock(call: &CallExpression<'_>, source: &str) -> Option<MockCall> {
                 return None;
             }
             match &*member.property.name {
-                "fn" => MockKind::ViFn,
-                "mock" => MockKind::ViMock,
-                "spyOn" => MockKind::ViSpyOn,
-                _ => return None,
+                "fn" => Some(MockKind::ViFn),
+                "mock" => Some(MockKind::ViMock),
+                "spyOn" => Some(MockKind::ViSpyOn),
+                _ => None,
             }
         }
-        Expression::Identifier(id) if id.name == "mock" => MockKind::BunMock,
-        _ => return None,
-    };
-    let line = offset_to_line(source, call.span.start);
-    Some(MockCall { line, kind })
+        Expression::Identifier(id) if id.name == "mock" => Some(MockKind::BunMock),
+        _ => None,
+    }
+}
+
+// --- Act (SUT invocation) detection, js-testing-best-practices §1.2 (AAA) ---
+//
+// A test's "Act" is a call into production code. `body_has_act` returns true if
+// the body contains at least one such call. Calls that are part of an `expect`
+// chain or a mock setup (`vi.fn`/`vi.mock`/`vi.spyOn`/bare `mock`) are NOT acts;
+// every other call (including `expect(sut())`'s inner argument, a `new`, or a
+// tagged template) is. The traversal descends every expression position a call
+// can hide in, so a test whose only invocation sits in an assignment, ternary,
+// object value, or cast is still seen as having an act. Unknown call positions
+// bias toward "has act" (no finding), protecting the precision indicator.
+fn body_has_act(stmts: &[Statement<'_>]) -> bool {
+    stmts.iter().any(stmt_has_act)
+}
+
+// Names the body declares locally (its "Arrange"). A test with no local
+// binding gets its data from setup hooks or module imports, so a missing Act
+// there is not a finding; the binding is what makes "arranged data asserted
+// without acting" a real AAA gap. missing-act further requires an assertion to
+// target one of these names, so hook-sourced assertion targets do not fire.
+fn body_bound_names(stmts: &[Statement<'_>]) -> Vec<String> {
+    let mut names = Vec::new();
+    collect_bound_names(stmts, &mut names);
+    names
+}
+
+fn collect_bound_names(stmts: &[Statement<'_>], out: &mut Vec<String>) {
+    for stmt in stmts {
+        stmt_bound_names(stmt, out);
+    }
+}
+
+fn stmt_bound_names(stmt: &Statement<'_>, out: &mut Vec<String>) {
+    match stmt {
+        Statement::VariableDeclaration(vd) => {
+            for d in &vd.declarations {
+                collect_pattern_names(&d.id, out);
+            }
+        }
+        Statement::BlockStatement(bs) => collect_bound_names(&bs.body, out),
+        Statement::IfStatement(s) => {
+            stmt_bound_names(&s.consequent, out);
+            if let Some(a) = &s.alternate {
+                stmt_bound_names(a, out);
+            }
+        }
+        Statement::ForStatement(s) => stmt_bound_names(&s.body, out),
+        Statement::ForInStatement(s) => stmt_bound_names(&s.body, out),
+        Statement::ForOfStatement(s) => stmt_bound_names(&s.body, out),
+        Statement::WhileStatement(s) => stmt_bound_names(&s.body, out),
+        Statement::DoWhileStatement(s) => stmt_bound_names(&s.body, out),
+        Statement::TryStatement(s) => {
+            collect_bound_names(&s.block.body, out);
+            if let Some(h) = &s.handler {
+                collect_bound_names(&h.body.body, out);
+            }
+            if let Some(f) = &s.finalizer {
+                collect_bound_names(&f.body, out);
+            }
+        }
+        Statement::SwitchStatement(s) => {
+            for c in &s.cases {
+                collect_bound_names(&c.consequent, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+// Collects every identifier a binding pattern introduces, descending through
+// object/array destructuring and default-value patterns. Unhandled shapes
+// yield no name, which only suppresses missing-act (a safe false negative).
+fn collect_pattern_names(pat: &BindingPattern<'_>, out: &mut Vec<String>) {
+    match pat {
+        BindingPattern::BindingIdentifier(id) => out.push(id.name.to_string()),
+        BindingPattern::ObjectPattern(obj) => {
+            for prop in &obj.properties {
+                collect_pattern_names(&prop.value, out);
+            }
+            if let Some(rest) = &obj.rest {
+                collect_pattern_names(&rest.argument, out);
+            }
+        }
+        BindingPattern::ArrayPattern(arr) => {
+            for elem in arr.elements.iter().flatten() {
+                collect_pattern_names(elem, out);
+            }
+            if let Some(rest) = &arr.rest {
+                collect_pattern_names(&rest.argument, out);
+            }
+        }
+        BindingPattern::AssignmentPattern(ap) => collect_pattern_names(&ap.left, out),
+    }
+}
+
+fn stmt_has_act(stmt: &Statement<'_>) -> bool {
+    match stmt {
+        Statement::ExpressionStatement(es) => expr_has_act(&es.expression),
+        Statement::VariableDeclaration(vd) => vd
+            .declarations
+            .iter()
+            .any(|d| d.init.as_ref().is_some_and(expr_has_act)),
+        Statement::ReturnStatement(rs) => rs.argument.as_ref().is_some_and(expr_has_act),
+        Statement::BlockStatement(bs) => body_has_act(&bs.body),
+        Statement::IfStatement(s) => {
+            expr_has_act(&s.test)
+                || stmt_has_act(&s.consequent)
+                || s.alternate.as_ref().is_some_and(|a| stmt_has_act(a))
+        }
+        Statement::ForStatement(s) => {
+            s.test.as_ref().is_some_and(expr_has_act) || stmt_has_act(&s.body)
+        }
+        Statement::ForInStatement(s) => expr_has_act(&s.right) || stmt_has_act(&s.body),
+        Statement::ForOfStatement(s) => expr_has_act(&s.right) || stmt_has_act(&s.body),
+        Statement::WhileStatement(s) => expr_has_act(&s.test) || stmt_has_act(&s.body),
+        Statement::DoWhileStatement(s) => expr_has_act(&s.test) || stmt_has_act(&s.body),
+        Statement::TryStatement(s) => try_has_act(s),
+        Statement::SwitchStatement(s) => {
+            expr_has_act(&s.discriminant)
+                || s.cases
+                    .iter()
+                    .any(|c| c.consequent.iter().any(stmt_has_act))
+        }
+        Statement::ThrowStatement(s) => expr_has_act(&s.argument),
+        _ => false,
+    }
+}
+
+fn try_has_act(try_stmt: &TryStatement<'_>) -> bool {
+    body_has_act(&try_stmt.block.body)
+        || try_stmt
+            .handler
+            .as_ref()
+            .is_some_and(|h| body_has_act(&h.body.body))
+        || try_stmt
+            .finalizer
+            .as_ref()
+            .is_some_and(|f| body_has_act(&f.body))
+}
+
+fn expr_has_act(expr: &Expression<'_>) -> bool {
+    match expr {
+        Expression::CallExpression(call) => call_has_act(call),
+        // Constructing production code and tagging a template both invoke code.
+        Expression::NewExpression(_) | Expression::TaggedTemplateExpression(_) => true,
+        Expression::ParenthesizedExpression(p) => expr_has_act(&p.expression),
+        Expression::AwaitExpression(a) => expr_has_act(&a.argument),
+        Expression::UnaryExpression(u) => expr_has_act(&u.argument),
+        Expression::BinaryExpression(b) => expr_has_act(&b.left) || expr_has_act(&b.right),
+        Expression::LogicalExpression(l) => expr_has_act(&l.left) || expr_has_act(&l.right),
+        Expression::ConditionalExpression(c) => {
+            expr_has_act(&c.test) || expr_has_act(&c.consequent) || expr_has_act(&c.alternate)
+        }
+        Expression::SequenceExpression(s) => s.expressions.iter().any(expr_has_act),
+        Expression::AssignmentExpression(a) => expr_has_act(&a.right),
+        Expression::ArrayExpression(arr) => array_has_act(arr),
+        Expression::ObjectExpression(obj) => object_has_act(obj),
+        Expression::StaticMemberExpression(m) => expr_has_act(&m.object),
+        Expression::ComputedMemberExpression(m) => {
+            expr_has_act(&m.object) || expr_has_act(&m.expression)
+        }
+        Expression::TemplateLiteral(t) => t.expressions.iter().any(expr_has_act),
+        Expression::TSAsExpression(t) => expr_has_act(&t.expression),
+        Expression::TSSatisfiesExpression(t) => expr_has_act(&t.expression),
+        Expression::TSNonNullExpression(t) => expr_has_act(&t.expression),
+        Expression::TSTypeAssertion(t) => expr_has_act(&t.expression),
+        Expression::ChainExpression(c) => chain_has_act(&c.expression),
+        _ => false,
+    }
+}
+
+fn call_has_act(call: &CallExpression<'_>) -> bool {
+    if is_act_call(call) {
+        return true;
+    }
+    // An expect/mock call is not itself an act, but a nested call can be: the
+    // inner `sut()` in `expect(sut()).toBe(x)` lives in the callee chain/args.
+    expr_has_act(&call.callee) || call.arguments.iter().any(arg_has_act)
+}
+
+// True when the call invokes production code: neither an `expect(...)` chain nor
+// a recognized mock setup.
+fn is_act_call(call: &CallExpression<'_>) -> bool {
+    !is_assertion_call(call) && mock_kind(call).is_none()
+}
+
+fn is_assertion_call(call: &CallExpression<'_>) -> bool {
+    matches!(callee_name(&call.callee), Some(("expect", _))) || is_expect_chain(&call.callee)
+}
+
+fn is_expect_chain(expr: &Expression<'_>) -> bool {
+    match expr {
+        Expression::CallExpression(call) => {
+            matches!(callee_name(&call.callee), Some(("expect", _)))
+        }
+        Expression::StaticMemberExpression(m) => is_expect_chain(&m.object),
+        _ => false,
+    }
+}
+
+fn chain_has_act(element: &ChainElement<'_>) -> bool {
+    match element {
+        ChainElement::CallExpression(call) => call_has_act(call),
+        ChainElement::TSNonNullExpression(t) => expr_has_act(&t.expression),
+        ChainElement::StaticMemberExpression(m) => expr_has_act(&m.object),
+        ChainElement::ComputedMemberExpression(m) => {
+            expr_has_act(&m.object) || expr_has_act(&m.expression)
+        }
+        ChainElement::PrivateFieldExpression(m) => expr_has_act(&m.object),
+    }
+}
+
+fn arg_has_act(arg: &Argument<'_>) -> bool {
+    match arg {
+        Argument::SpreadElement(se) => expr_has_act(&se.argument),
+        _ => arg.as_expression().is_some_and(expr_has_act),
+    }
+}
+
+fn array_has_act(arr: &ArrayExpression<'_>) -> bool {
+    arr.elements.iter().any(|el| match el {
+        ArrayExpressionElement::SpreadElement(se) => expr_has_act(&se.argument),
+        ArrayExpressionElement::Elision(_) => false,
+        _ => el.as_expression().is_some_and(expr_has_act),
+    })
+}
+
+fn object_has_act(obj: &ObjectExpression<'_>) -> bool {
+    obj.properties.iter().any(|prop| match prop {
+        ObjectPropertyKind::ObjectProperty(p) => expr_has_act(&p.value),
+        ObjectPropertyKind::SpreadProperty(s) => expr_has_act(&s.argument),
+    })
 }
 
 fn offset_to_line(source: &str, offset: u32) -> u32 {
@@ -1498,5 +1773,154 @@ describe("outer", () => {
     fn non_string_array_element_skipped() {
         let blocks = parse(r#"test("seeds users", () => { seed([1, "foo"]) })"#);
         assert_eq!(dummy_values(&blocks[0]), vec!["foo"]);
+    }
+
+    // T-270: arrange-only body (local literal + assertion) has no Act
+    #[test]
+    fn has_act_false_for_arrange_only() {
+        let blocks = parse(r#"test("x", () => { const v = 42; expect(v).toBe(42) })"#);
+        assert!(!blocks[0].has_act);
+        assert_eq!(blocks[0].bound_names, vec!["v"]);
+    }
+
+    // T-271: a bare production call is an Act
+    #[test]
+    fn has_act_true_for_bare_call() {
+        let blocks = parse(r#"test("x", () => { doThing(); expect(x).toBe(1) })"#);
+        assert!(blocks[0].has_act);
+    }
+
+    // T-272: a call in a variable initializer is an Act
+    #[test]
+    fn has_act_true_for_call_in_initializer() {
+        let blocks = parse(r#"test("x", () => { const r = compute(2); expect(r).toBe(4) })"#);
+        assert!(blocks[0].has_act);
+        assert_eq!(blocks[0].bound_names, vec!["r"]);
+    }
+
+    // T-273: `new` construction is an Act
+    #[test]
+    fn has_act_true_for_new_expression() {
+        let blocks = parse(r#"test("x", () => { const u = new User(); expect(u.id).toBe(1) })"#);
+        assert!(blocks[0].has_act);
+    }
+
+    // T-274: a tagged template invocation is an Act
+    #[test]
+    fn has_act_true_for_tagged_template() {
+        let blocks =
+            parse(r#"test("x", () => { const q = sql`SELECT 1`; expect(q).toBeDefined() })"#);
+        assert!(blocks[0].has_act);
+    }
+
+    // T-275: an awaited call is an Act
+    #[test]
+    fn has_act_true_for_awaited_call() {
+        let blocks = parse(
+            r#"test("x", async () => { const r = await fetchUser(1); expect(r).toBeDefined() })"#,
+        );
+        assert!(blocks[0].has_act);
+    }
+
+    // T-276: a call on the right of an assignment is an Act
+    #[test]
+    fn has_act_true_for_assignment_rhs_call() {
+        let blocks = parse(r#"test("x", () => { let r; r = compute(); expect(r).toBe(1) })"#);
+        assert!(blocks[0].has_act);
+    }
+
+    // T-277: a call inside a ternary branch is an Act
+    #[test]
+    fn has_act_true_for_ternary_call() {
+        let blocks = parse(r#"test("x", () => { const r = cond ? run() : 0; expect(r).toBe(1) })"#);
+        assert!(blocks[0].has_act);
+    }
+
+    // T-278: a call in an object property value is an Act
+    #[test]
+    fn has_act_true_for_object_value_call() {
+        let blocks =
+            parse(r#"test("x", () => { const o = { id: makeId() }; expect(o.id).toBe(1) })"#);
+        assert!(blocks[0].has_act);
+    }
+
+    // T-279: a call behind a TS cast is an Act
+    #[test]
+    fn has_act_true_for_cast_call() {
+        let blocks = parse(r#"test("x", () => { const r = run() as number; expect(r).toBe(1) })"#);
+        assert!(blocks[0].has_act);
+    }
+
+    // T-280: a call inside an optional chain is an Act
+    #[test]
+    fn has_act_true_for_chain_call() {
+        let blocks = parse(r#"test("x", () => { const r = svc?.run(); expect(r).toBe(1) })"#);
+        assert!(blocks[0].has_act);
+    }
+
+    // T-281: a call in an array element is an Act
+    #[test]
+    fn has_act_true_for_array_element_call() {
+        let blocks = parse(r#"test("x", () => { const xs = [run()]; expect(xs[0]).toBe(1) })"#);
+        assert!(blocks[0].has_act);
+    }
+
+    // T-282: an expect/assertion call alone is not an Act
+    #[test]
+    fn has_act_false_for_assertion_only() {
+        let blocks = parse(r#"test("x", () => { expect(result).toBe(1) })"#);
+        assert!(!blocks[0].has_act);
+        assert!(blocks[0].bound_names.is_empty());
+    }
+
+    // T-283: a mock-setup call alone is not an Act
+    #[test]
+    fn has_act_false_for_mock_setup_only() {
+        let blocks = parse(r#"test("x", () => { const m = vi.fn(); expect(m).toBeDefined() })"#);
+        assert!(!blocks[0].has_act);
+        assert_eq!(blocks[0].bound_names, vec!["m"]);
+    }
+
+    // T-284: a local declaration inside a nested block is collected
+    #[test]
+    fn bound_names_collected_in_nested_block() {
+        let blocks = parse(r#"test("x", () => { if (c) { const v = 1; expect(v).toBe(1) } })"#);
+        assert_eq!(blocks[0].bound_names, vec!["v"]);
+    }
+
+    // T-285: destructuring binds every introduced name
+    #[test]
+    fn bound_names_from_destructuring() {
+        let blocks = parse(r#"test("x", () => { const { a, b } = obj; const [c] = arr })"#);
+        assert_eq!(blocks[0].bound_names, vec!["a", "b", "c"]);
+    }
+
+    // T-286: assertion target root is the leading identifier of a member chain
+    #[test]
+    fn target_root_is_member_chain_head() {
+        let blocks = parse(r#"test("x", () => { expect(user.profile.name).toBe("a") })"#);
+        assert_eq!(blocks[0].assertions[0].target_root.as_deref(), Some("user"));
+    }
+
+    // T-287: a literal assertion target has no root identifier
+    #[test]
+    fn target_root_none_for_literal() {
+        let blocks = parse(r#"test("x", () => { expect(42).toBe(42) })"#);
+        assert_eq!(blocks[0].assertions[0].target_root, None);
+    }
+
+    // T-288: arranged-then-asserted-on-bound-name is the missing-act shape;
+    // arranging "expected" while asserting on a hook value is not.
+    #[test]
+    fn bound_name_matches_asserted_root() {
+        let fires = parse(r#"test("x", () => { const total = 42; expect(total).toBe(42) })"#);
+        assert!(fires[0].bound_names.iter().any(|n| n == "total"));
+        assert_eq!(fires[0].assertions[0].target_root.as_deref(), Some("total"));
+
+        let safe = parse(
+            r#"test("x", () => { const expected = "a"; expect(result.name).toBe(expected) })"#,
+        );
+        assert_eq!(safe[0].assertions[0].target_root.as_deref(), Some("result"));
+        assert!(!safe[0].bound_names.iter().any(|n| n == "result"));
     }
 }
