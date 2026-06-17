@@ -453,10 +453,7 @@ fn collect_dummies_expr(expr: &Expression<'_>, source: &str, out: &mut Vec<Dummy
         Expression::ObjectExpression(obj) => collect_dummies_object(obj, source, out),
         Expression::ArrayExpression(arr) => collect_dummies_array(arr, source, out),
         Expression::StaticMemberExpression(m) => collect_dummies_expr(&m.object, source, out),
-        Expression::ComputedMemberExpression(m) => {
-            collect_dummies_expr(&m.object, source, out);
-            collect_dummies_expr(&m.expression, source, out);
-        }
+        Expression::ComputedMemberExpression(m) => collect_dummies_expr(&m.object, source, out),
         Expression::AwaitExpression(a) => collect_dummies_expr(&a.argument, source, out),
         Expression::ParenthesizedExpression(p) => collect_dummies_expr(&p.expression, source, out),
         _ => {}
@@ -509,10 +506,7 @@ fn collect_dummies_call(call: &CallExpression<'_>, source: &str, out: &mut Vec<D
             Argument::ObjectExpression(o) => collect_dummies_object(o, source, out),
             Argument::ArrayExpression(a) => collect_dummies_array(a, source, out),
             Argument::StaticMemberExpression(m) => collect_dummies_expr(&m.object, source, out),
-            Argument::ComputedMemberExpression(m) => {
-                collect_dummies_expr(&m.object, source, out);
-                collect_dummies_expr(&m.expression, source, out);
-            }
+            Argument::ComputedMemberExpression(m) => collect_dummies_expr(&m.object, source, out),
             Argument::AwaitExpression(a) => collect_dummies_expr(&a.argument, source, out),
             Argument::ParenthesizedExpression(p) => {
                 if !(suppress && is_direct_string(&p.expression)) {
@@ -525,14 +519,12 @@ fn collect_dummies_call(call: &CallExpression<'_>, source: &str, out: &mut Vec<D
     }
 }
 
-// A direct string literal, possibly wrapped in redundant parentheses. Used to
-// extend expect() suppression to expect(("foo")) so it matches expect("foo").
+// The expression inside a parenthesized expect argument is a direct string.
+// Used to extend expect() suppression to expect(("foo")) so it matches
+// expect("foo"). The caller (Argument::ParenthesizedExpression) has already
+// unwrapped the outer parentheses.
 fn is_direct_string(expr: &Expression<'_>) -> bool {
-    match expr {
-        Expression::StringLiteral(_) => true,
-        Expression::ParenthesizedExpression(p) => is_direct_string(&p.expression),
-        _ => false,
-    }
+    matches!(expr, Expression::StringLiteral(_))
 }
 
 fn push_if_dummy(s: &StringLiteral<'_>, source: &str, out: &mut Vec<DummyLiteral>) {
@@ -1389,6 +1381,122 @@ describe("outer", () => {
     #[test]
     fn dummy_in_spread_argument() {
         let blocks = parse(r#"test("creates a user", () => { createUser(...["foo"]) })"#);
+        assert_eq!(dummy_values(&blocks[0]), vec!["foo"]);
+    }
+
+    // T-246: dummy inside a return statement → collected
+    #[test]
+    fn dummy_in_return_statement() {
+        let blocks = parse(r#"test("returns a user", () => { return createUser("foo") })"#);
+        assert_eq!(dummy_values(&blocks[0]), vec!["foo"]);
+    }
+
+    // T-247: dummy inside an else branch → collected
+    #[test]
+    fn dummy_in_else_branch() {
+        let blocks =
+            parse(r#"test("branches", () => { if (cond) { run() } else { createUser("foo") } })"#);
+        assert_eq!(dummy_values(&blocks[0]), vec!["foo"]);
+    }
+
+    // T-248: dummy inside a for loop body → collected
+    #[test]
+    fn dummy_in_for_body() {
+        let blocks =
+            parse(r#"test("loops", () => { for (let i = 0; i < 1; i++) { createUser("foo") } })"#);
+        assert_eq!(dummy_values(&blocks[0]), vec!["foo"]);
+    }
+
+    // T-249: dummy inside a for-in loop body → collected
+    #[test]
+    fn dummy_in_for_in_body() {
+        let blocks = parse(r#"test("loops", () => { for (const k in o) { createUser("foo") } })"#);
+        assert_eq!(dummy_values(&blocks[0]), vec!["foo"]);
+    }
+
+    // T-250: dummy inside a while loop body → collected
+    #[test]
+    fn dummy_in_while_body() {
+        let blocks = parse(r#"test("loops", () => { while (cond) { createUser("foo") } })"#);
+        assert_eq!(dummy_values(&blocks[0]), vec!["foo"]);
+    }
+
+    // T-251: dummy inside a do-while loop body → collected
+    #[test]
+    fn dummy_in_do_while_body() {
+        let blocks = parse(r#"test("loops", () => { do { createUser("foo") } while (cond) })"#);
+        assert_eq!(dummy_values(&blocks[0]), vec!["foo"]);
+    }
+
+    // T-252: dummy inside a switch case → collected
+    #[test]
+    fn dummy_in_switch_case() {
+        let blocks =
+            parse(r#"test("switches", () => { switch (x) { case 1: createUser("foo") } })"#);
+        assert_eq!(dummy_values(&blocks[0]), vec!["foo"]);
+    }
+
+    // T-253: dummy in an object literal bound to a variable → collected
+    #[test]
+    fn dummy_in_object_variable_init() {
+        let blocks = parse(r#"test("builds a user", () => { const u = { name: "foo" }; use(u) })"#);
+        assert_eq!(dummy_values(&blocks[0]), vec!["foo"]);
+    }
+
+    // T-254: dummy wrapped in parentheses bound to a variable → collected
+    #[test]
+    fn dummy_in_parenthesized_variable_init() {
+        let blocks = parse(r#"test("builds a value", () => { const u = ("foo"); use(u) })"#);
+        assert_eq!(dummy_values(&blocks[0]), vec!["foo"]);
+    }
+
+    // T-255: dummy in the object of a computed member access → collected (key not flagged)
+    #[test]
+    fn dummy_in_computed_member_object() {
+        let blocks = parse(r#"test("reads a field", () => { getUser("foo")["id"] })"#);
+        assert_eq!(dummy_values(&blocks[0]), vec!["foo"]);
+    }
+
+    // T-256: dummy array spread into an object literal → collected
+    #[test]
+    fn dummy_in_object_spread() {
+        let blocks = parse(r#"test("builds a user", () => { createUser({ ...["foo"] }) })"#);
+        assert_eq!(dummy_values(&blocks[0]), vec!["foo"]);
+    }
+
+    // T-257: dummy in a call nested inside an array element → collected
+    #[test]
+    fn dummy_in_array_element_call() {
+        let blocks = parse(r#"test("seeds users", () => { seed([makeUser("foo")]) })"#);
+        assert_eq!(dummy_values(&blocks[0]), vec!["foo"]);
+    }
+
+    // T-258: dummy in a nested array element → collected
+    #[test]
+    fn dummy_in_nested_array() {
+        let blocks = parse(r#"test("seeds users", () => { seed([["foo"]]) })"#);
+        assert_eq!(dummy_values(&blocks[0]), vec!["foo"]);
+    }
+
+    // T-259: dummy array spread into an array element → collected
+    #[test]
+    fn dummy_in_array_spread_element() {
+        let blocks = parse(r#"test("seeds users", () => { seed([...["foo"]]) })"#);
+        assert_eq!(dummy_values(&blocks[0]), vec!["foo"]);
+    }
+
+    // T-260: dummy in the object of a computed member passed as an argument → collected
+    #[test]
+    fn dummy_in_computed_member_argument() {
+        let blocks =
+            parse(r#"test("reads a field", () => { expect(getUser("foo")["id"]).toBe(1) })"#);
+        assert_eq!(dummy_values(&blocks[0]), vec!["foo"]);
+    }
+
+    // T-261: non-string array element is skipped while a sibling dummy is collected
+    #[test]
+    fn non_string_array_element_skipped() {
+        let blocks = parse(r#"test("seeds users", () => { seed([1, "foo"]) })"#);
         assert_eq!(dummy_values(&blocks[0]), vec!["foo"]);
     }
 }
