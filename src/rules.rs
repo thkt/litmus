@@ -11,6 +11,27 @@ pub struct Issue {
     pub detail: String,
 }
 
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum Severity {
+    Warning,
+    Blocking,
+}
+
+// Rules whose findings are advisory (exit code 1) rather than blocking (exit 2).
+// Severity is a property of the rule, not of the individual finding, so it is
+// derived from the rule name rather than stored on every Issue.
+const WARNING_RULES: &[&str] = &["dummy-data"];
+
+impl Issue {
+    pub fn severity(&self) -> Severity {
+        if WARNING_RULES.contains(&self.rule) {
+            Severity::Warning
+        } else {
+            Severity::Blocking
+        }
+    }
+}
+
 impl fmt::Display for Issue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -249,6 +270,22 @@ pub fn check_test_name(blocks: &[TestBlock], file: &Path) -> Vec<Issue> {
     issues
 }
 
+pub fn check_dummy_data(blocks: &[TestBlock], file: &Path) -> Vec<Issue> {
+    let mut issues = Vec::new();
+    for block in blocks {
+        for dummy in &block.dummy_literals {
+            issues.push(Issue {
+                rule: "dummy-data",
+                file: file.to_path_buf(),
+                line: dummy.line,
+                test_name: block.name.clone(),
+                detail: format!("dummy value: {}", dummy.value),
+            });
+        }
+    }
+    issues
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -267,6 +304,7 @@ mod tests {
             modifier: None,
             has_empty_body: false,
             catch_swallows: Vec::new(),
+            dummy_literals: Vec::new(),
         }
     }
 
@@ -506,6 +544,7 @@ mod tests {
             modifier: None,
             has_empty_body: false,
             catch_swallows: Vec::new(),
+            dummy_literals: Vec::new(),
         }
     }
 
@@ -589,6 +628,7 @@ mod tests {
             modifier: None,
             has_empty_body: true,
             catch_swallows: Vec::new(),
+            dummy_literals: Vec::new(),
         }
     }
 
@@ -601,6 +641,7 @@ mod tests {
             modifier: Some(modifier),
             has_empty_body: false,
             catch_swallows: Vec::new(),
+            dummy_literals: Vec::new(),
         }
     }
 
@@ -759,5 +800,86 @@ mod tests {
         let blocks = vec![block(vec![], vec![])];
         let issues = check_catch_only_assertion(&blocks, path());
         assert_eq!(issues.len(), 0);
+    }
+
+    fn dummy_literal(value: &str, line: u32) -> DummyLiteral {
+        DummyLiteral {
+            value: value.into(),
+            line,
+        }
+    }
+
+    fn block_with_dummies(dummies: Vec<DummyLiteral>) -> TestBlock {
+        TestBlock {
+            name: "test case".into(),
+            line: 1,
+            assertions: vec![],
+            mock_calls: vec![],
+            modifier: None,
+            has_empty_body: false,
+            catch_swallows: Vec::new(),
+            dummy_literals: dummies,
+        }
+    }
+
+    // T-230: dummy literals → one issue per literal at the literal's line
+    #[test]
+    fn dummy_data_one_issue_per_literal() {
+        let b = block_with_dummies(vec![dummy_literal("foo", 2), dummy_literal("bar", 3)]);
+        let issues = check_dummy_data(&[b], path());
+        assert_eq!(issues.len(), 2);
+        assert!(issues.iter().all(|i| i.rule == "dummy-data"));
+        assert_eq!(issues[0].line, 2);
+        assert_eq!(issues[1].line, 3);
+    }
+
+    // T-231: no dummy literals → no issue
+    #[test]
+    fn dummy_data_empty_no_issue() {
+        let issues = check_dummy_data(&[block_with_dummies(vec![])], path());
+        assert_eq!(issues.len(), 0);
+    }
+
+    // T-232: detail names the matched value
+    #[test]
+    fn dummy_data_detail_names_value() {
+        let b = block_with_dummies(vec![dummy_literal("foo", 2)]);
+        let issues = check_dummy_data(&[b], path());
+        assert!(issues[0].detail.contains("foo"));
+    }
+
+    // T-233: dummy-data is warning severity
+    #[test]
+    fn dummy_data_severity_is_warning() {
+        let b = block_with_dummies(vec![dummy_literal("foo", 2)]);
+        let issues = check_dummy_data(&[b], path());
+        assert_eq!(issues[0].severity(), Severity::Warning);
+    }
+
+    // T-234: another rule is blocking severity
+    #[test]
+    fn other_rule_severity_is_blocking() {
+        let issues = check_weak_assertions(&[block(vec![], vec![])], path());
+        assert_eq!(issues[0].severity(), Severity::Blocking);
+    }
+
+    // T-235: every rule listed in WARNING_RULES resolves to Warning, so a new
+    // warning rule added to the list cannot silently default to Blocking.
+    #[test]
+    fn all_warning_rules_resolve_to_warning() {
+        for rule in WARNING_RULES {
+            let issue = Issue {
+                rule,
+                file: path().to_path_buf(),
+                line: 1,
+                test_name: "case".to_owned(),
+                detail: String::new(),
+            };
+            assert_eq!(
+                issue.severity(),
+                Severity::Warning,
+                "rule {rule} should warn"
+            );
+        }
     }
 }

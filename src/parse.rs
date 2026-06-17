@@ -1,5 +1,8 @@
 use oxc_allocator::Allocator;
-use oxc_ast::ast::{Argument, CallExpression, Expression, FunctionBody, Statement, TryStatement};
+use oxc_ast::ast::{
+    Argument, ArrayExpression, ArrayExpressionElement, CallExpression, Expression, FunctionBody,
+    ObjectExpression, ObjectPropertyKind, Statement, StringLiteral, TryStatement,
+};
 use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType};
 use std::path::Path;
@@ -28,6 +31,15 @@ pub struct TestBlock {
     pub modifier: Option<TestModifier>,
     pub has_empty_body: bool,
     pub catch_swallows: Vec<u32>,
+    pub dummy_literals: Vec<DummyLiteral>,
+}
+
+/// A string literal inside a test body whose value matches a known dummy
+/// placeholder (js-testing-best-practices §1.6 "don't foo").
+#[derive(Debug, Clone, PartialEq)]
+pub struct DummyLiteral {
+    pub value: String,
+    pub line: u32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -65,6 +77,11 @@ pub enum MockKind {
 // toBeNull/toBeUndefined are specific value checks (≡ toBe(null)/toBe(undefined)),
 // not weak assertions like toBeTruthy/toBeDefined/toBeFalsy.
 const WEAK_MATCHERS: &[&str] = &["toBeTruthy", "toBeDefined", "toBeFalsy"];
+
+// Conservative dummy-placeholder set: near-zero false-positive tokens that are
+// almost never legitimate test inputs. "test"/"abc"/"xxx" and numeric patterns
+// are intentionally excluded (high FP vs. the precision indicator).
+const DUMMY_STRINGS: &[&str] = &["foo", "bar", "baz", "qux", "hoge", "fuga"];
 
 pub fn parse_test_file(source: &str, path: &Path) -> Result<Vec<TestBlock>, String> {
     let allocator = Allocator::default();
@@ -122,6 +139,7 @@ fn check_test_call(expr: &Expression<'_>, source: &str, blocks: &mut Vec<TestBlo
                         modifier: Some(TestModifier::Todo),
                         has_empty_body: true,
                         catch_swallows: Vec::new(),
+                        dummy_literals: Vec::new(),
                     });
                 }
             }
@@ -163,12 +181,14 @@ fn extract_test_block(call: &CallExpression<'_>, source: &str) -> Option<TestBlo
     let mut assertions = Vec::new();
     let mut mock_calls = Vec::new();
     let mut catch_swallows = Vec::new();
+    let mut dummy_literals = Vec::new();
     scan_body(
         &body.statements,
         source,
         &mut assertions,
         &mut mock_calls,
         &mut catch_swallows,
+        &mut dummy_literals,
         AssertionContext::TopLevel,
     );
 
@@ -180,6 +200,7 @@ fn extract_test_block(call: &CallExpression<'_>, source: &str) -> Option<TestBlo
         modifier: None,
         has_empty_body,
         catch_swallows,
+        dummy_literals,
     })
 }
 
@@ -204,10 +225,19 @@ fn scan_body(
     assertions: &mut Vec<Assertion>,
     mocks: &mut Vec<MockCall>,
     catch_swallows: &mut Vec<u32>,
+    dummies: &mut Vec<DummyLiteral>,
     context: AssertionContext,
 ) {
     for stmt in stmts {
-        scan_statement(stmt, source, assertions, mocks, catch_swallows, &context);
+        scan_statement(
+            stmt,
+            source,
+            assertions,
+            mocks,
+            catch_swallows,
+            dummies,
+            &context,
+        );
     }
 }
 
@@ -217,22 +247,26 @@ fn scan_statement(
     assertions: &mut Vec<Assertion>,
     mocks: &mut Vec<MockCall>,
     catch_swallows: &mut Vec<u32>,
+    dummies: &mut Vec<DummyLiteral>,
     context: &AssertionContext,
 ) {
     match stmt {
         Statement::ExpressionStatement(es) => {
             scan_expr(&es.expression, source, assertions, mocks, context);
+            collect_dummies_expr(&es.expression, source, dummies);
         }
         Statement::VariableDeclaration(vd) => {
             for decl in &vd.declarations {
                 if let Some(init) = &decl.init {
                     scan_expr(init, source, assertions, mocks, context);
+                    collect_dummies_expr(init, source, dummies);
                 }
             }
         }
         Statement::ReturnStatement(rs) => {
             if let Some(arg) = &rs.argument {
                 scan_expr(arg, source, assertions, mocks, context);
+                collect_dummies_expr(arg, source, dummies);
             }
         }
         Statement::BlockStatement(bs) => {
@@ -242,6 +276,7 @@ fn scan_statement(
                 assertions,
                 mocks,
                 catch_swallows,
+                dummies,
                 *context,
             );
         }
@@ -252,6 +287,7 @@ fn scan_statement(
                 assertions,
                 mocks,
                 catch_swallows,
+                dummies,
                 &AssertionContext::IfBranch,
             );
             if let Some(alt) = &if_stmt.alternate {
@@ -261,6 +297,7 @@ fn scan_statement(
                     assertions,
                     mocks,
                     catch_swallows,
+                    dummies,
                     &AssertionContext::IfBranch,
                 );
             }
@@ -272,6 +309,7 @@ fn scan_statement(
                 assertions,
                 mocks,
                 catch_swallows,
+                dummies,
                 context,
             );
         }
@@ -282,6 +320,7 @@ fn scan_statement(
                 assertions,
                 mocks,
                 catch_swallows,
+                dummies,
                 context,
             );
         }
@@ -292,6 +331,7 @@ fn scan_statement(
                 assertions,
                 mocks,
                 catch_swallows,
+                dummies,
                 context,
             );
         }
@@ -302,6 +342,7 @@ fn scan_statement(
                 assertions,
                 mocks,
                 catch_swallows,
+                dummies,
                 context,
             );
         }
@@ -312,11 +353,20 @@ fn scan_statement(
                 assertions,
                 mocks,
                 catch_swallows,
+                dummies,
                 context,
             );
         }
         Statement::TryStatement(try_stmt) => {
-            scan_try_statement(try_stmt, source, assertions, mocks, catch_swallows, context);
+            scan_try_statement(
+                try_stmt,
+                source,
+                assertions,
+                mocks,
+                catch_swallows,
+                dummies,
+                context,
+            );
         }
         Statement::SwitchStatement(switch_stmt) => {
             for case in &switch_stmt.cases {
@@ -326,6 +376,7 @@ fn scan_statement(
                     assertions,
                     mocks,
                     catch_swallows,
+                    dummies,
                     *context,
                 );
             }
@@ -340,6 +391,7 @@ fn scan_try_statement(
     assertions: &mut Vec<Assertion>,
     mocks: &mut Vec<MockCall>,
     catch_swallows: &mut Vec<u32>,
+    dummies: &mut Vec<DummyLiteral>,
     context: &AssertionContext,
 ) {
     scan_body(
@@ -348,6 +400,7 @@ fn scan_try_statement(
         assertions,
         mocks,
         catch_swallows,
+        dummies,
         AssertionContext::TryBlock,
     );
 
@@ -363,6 +416,7 @@ fn scan_try_statement(
                     &mut catch_assertions,
                     mocks,
                     catch_swallows,
+                    dummies,
                     &AssertionContext::CatchBlock,
                 );
             }
@@ -386,8 +440,107 @@ fn scan_try_statement(
             assertions,
             mocks,
             catch_swallows,
+            dummies,
             *context,
         );
+    }
+}
+
+fn collect_dummies_expr(expr: &Expression<'_>, source: &str, out: &mut Vec<DummyLiteral>) {
+    match expr {
+        Expression::StringLiteral(s) => push_if_dummy(s, source, out),
+        Expression::CallExpression(call) => collect_dummies_call(call, source, out),
+        Expression::ObjectExpression(obj) => collect_dummies_object(obj, source, out),
+        Expression::ArrayExpression(arr) => collect_dummies_array(arr, source, out),
+        Expression::StaticMemberExpression(m) => collect_dummies_expr(&m.object, source, out),
+        Expression::ComputedMemberExpression(m) => {
+            collect_dummies_expr(&m.object, source, out);
+            collect_dummies_expr(&m.expression, source, out);
+        }
+        Expression::AwaitExpression(a) => collect_dummies_expr(&a.argument, source, out),
+        Expression::ParenthesizedExpression(p) => collect_dummies_expr(&p.expression, source, out),
+        _ => {}
+    }
+}
+
+// Recurse into object property VALUES only. A key like `{ foo: 1 }` names a
+// field, not a test input, so flagging it would be a false positive.
+fn collect_dummies_object(obj: &ObjectExpression<'_>, source: &str, out: &mut Vec<DummyLiteral>) {
+    for prop in &obj.properties {
+        match prop {
+            ObjectPropertyKind::ObjectProperty(p) => collect_dummies_expr(&p.value, source, out),
+            ObjectPropertyKind::SpreadProperty(s) => {
+                collect_dummies_expr(&s.argument, source, out);
+            }
+        }
+    }
+}
+
+fn collect_dummies_array(arr: &ArrayExpression<'_>, source: &str, out: &mut Vec<DummyLiteral>) {
+    for element in &arr.elements {
+        match element {
+            ArrayExpressionElement::StringLiteral(s) => push_if_dummy(s, source, out),
+            ArrayExpressionElement::CallExpression(c) => collect_dummies_call(c, source, out),
+            ArrayExpressionElement::ObjectExpression(o) => collect_dummies_object(o, source, out),
+            ArrayExpressionElement::ArrayExpression(a) => collect_dummies_array(a, source, out),
+            ArrayExpressionElement::SpreadElement(se) => {
+                collect_dummies_expr(&se.argument, source, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn collect_dummies_call(call: &CallExpression<'_>, source: &str, out: &mut Vec<DummyLiteral>) {
+    // expect(<literal>) is already reported by the tautological rule, so suppress
+    // its direct string argument here, including a parenthesized one like
+    // expect(("foo")). Nested calls are still recursed into, so
+    // expect(slugify("foo")) flags "foo".
+    let suppress = matches!(callee_name(&call.callee), Some(("expect", _)));
+    collect_dummies_expr(&call.callee, source, out);
+    for arg in &call.arguments {
+        match arg {
+            Argument::StringLiteral(s) => {
+                if !suppress {
+                    push_if_dummy(s, source, out);
+                }
+            }
+            Argument::CallExpression(c) => collect_dummies_call(c, source, out),
+            Argument::ObjectExpression(o) => collect_dummies_object(o, source, out),
+            Argument::ArrayExpression(a) => collect_dummies_array(a, source, out),
+            Argument::StaticMemberExpression(m) => collect_dummies_expr(&m.object, source, out),
+            Argument::ComputedMemberExpression(m) => {
+                collect_dummies_expr(&m.object, source, out);
+                collect_dummies_expr(&m.expression, source, out);
+            }
+            Argument::AwaitExpression(a) => collect_dummies_expr(&a.argument, source, out),
+            Argument::ParenthesizedExpression(p) => {
+                if !(suppress && is_direct_string(&p.expression)) {
+                    collect_dummies_expr(&p.expression, source, out);
+                }
+            }
+            Argument::SpreadElement(se) => collect_dummies_expr(&se.argument, source, out),
+            _ => {}
+        }
+    }
+}
+
+// A direct string literal, possibly wrapped in redundant parentheses. Used to
+// extend expect() suppression to expect(("foo")) so it matches expect("foo").
+fn is_direct_string(expr: &Expression<'_>) -> bool {
+    match expr {
+        Expression::StringLiteral(_) => true,
+        Expression::ParenthesizedExpression(p) => is_direct_string(&p.expression),
+        _ => false,
+    }
+}
+
+fn push_if_dummy(s: &StringLiteral<'_>, source: &str, out: &mut Vec<DummyLiteral>) {
+    if DUMMY_STRINGS.contains(&s.value.as_str()) {
+        out.push(DummyLiteral {
+            value: s.value.to_string(),
+            line: offset_to_line(source, s.span.start),
+        });
     }
 }
 
@@ -1120,5 +1273,122 @@ describe("outer", () => {
         assert_eq!(blocks[0].assertions.len(), 1);
         assert_eq!(blocks[0].assertions[0].context, AssertionContext::TopLevel);
         assert_eq!(blocks[0].catch_swallows.len(), 1);
+    }
+
+    fn dummy_values(block: &TestBlock) -> Vec<&str> {
+        block
+            .dummy_literals
+            .iter()
+            .map(|d| d.value.as_str())
+            .collect()
+    }
+
+    // T-220: dummy string as a call argument → collected
+    #[test]
+    fn dummy_in_call_argument() {
+        let blocks = parse(r#"test("creates a user", () => { createUser("foo") })"#);
+        assert_eq!(dummy_values(&blocks[0]), vec!["foo"]);
+    }
+
+    // T-221: dummy string as a matcher argument → collected
+    #[test]
+    fn dummy_in_matcher_argument() {
+        let blocks = parse(r#"test("checks the value", () => { expect(x).toBe("bar") })"#);
+        assert_eq!(dummy_values(&blocks[0]), vec!["bar"]);
+    }
+
+    // T-222: dummy nested inside expect's argument call → collected
+    #[test]
+    fn dummy_nested_in_expect_call() {
+        let blocks = parse(r#"test("slugifies input", () => { expect(slugify("foo")).toBe(x) })"#);
+        assert_eq!(dummy_values(&blocks[0]), vec!["foo"]);
+    }
+
+    // T-223: dummy as expect's direct argument → suppressed (tautological covers it)
+    #[test]
+    fn dummy_direct_expect_arg_suppressed() {
+        let blocks = parse(r#"test("checks literal", () => { expect("foo").toBe(x) })"#);
+        assert!(blocks[0].dummy_literals.is_empty());
+    }
+
+    // T-224: non-dummy string → not collected
+    #[test]
+    fn non_dummy_string_ignored() {
+        let blocks = parse(r#"test("creates a user", () => { createUser("alice") })"#);
+        assert!(blocks[0].dummy_literals.is_empty());
+    }
+
+    // T-225: numeric literals → not collected (strings only)
+    #[test]
+    fn numeric_literals_ignored() {
+        let blocks = parse(r#"test("adds numbers", () => { add(123, 1234) })"#);
+        assert!(blocks[0].dummy_literals.is_empty());
+    }
+
+    // T-226: dummy as the test name → not collected (it is outside the body)
+    #[test]
+    fn dummy_test_name_ignored() {
+        let blocks = parse(r#"test("foo", () => { expect(realResult).toBe(realValue) })"#);
+        assert!(blocks[0].dummy_literals.is_empty());
+    }
+
+    // T-227: dummy as a variable initializer → collected
+    #[test]
+    fn dummy_in_variable_init() {
+        let blocks =
+            parse(r#"test("uses a fixture", () => { const u = "hoge"; expect(f(u)).toBe(1) })"#);
+        assert_eq!(dummy_values(&blocks[0]), vec!["hoge"]);
+    }
+
+    // T-228: multiple dummies → all collected with correct lines
+    #[test]
+    fn multiple_dummies_collected() {
+        let source = "test(\"x\", () => {\n  createUser(\"foo\")\n  createOrg(\"bar\")\n})";
+        let blocks = parse(source);
+        assert_eq!(dummy_values(&blocks[0]), vec!["foo", "bar"]);
+        assert_eq!(blocks[0].dummy_literals[0].line, 2);
+        assert_eq!(blocks[0].dummy_literals[1].line, 3);
+    }
+
+    // T-240: dummy as an object property value → collected
+    #[test]
+    fn dummy_in_object_value() {
+        let blocks = parse(r#"test("creates a user", () => { createUser({ name: "foo" }) })"#);
+        assert_eq!(dummy_values(&blocks[0]), vec!["foo"]);
+    }
+
+    // T-241: dummy property KEY → not collected (a key names a field, not input)
+    #[test]
+    fn dummy_object_key_ignored() {
+        let blocks = parse(r#"test("creates a user", () => { createUser({ foo: realValue }) })"#);
+        assert!(blocks[0].dummy_literals.is_empty());
+    }
+
+    // T-242: dummies inside an array literal → all collected
+    #[test]
+    fn dummies_in_array_literal() {
+        let blocks = parse(r#"test("seeds users", () => { seed(["foo", "bar"]) })"#);
+        assert_eq!(dummy_values(&blocks[0]), vec!["foo", "bar"]);
+    }
+
+    // T-243: dummy nested in an array of objects → collected
+    #[test]
+    fn dummy_in_array_of_objects() {
+        let blocks = parse(r#"test("seeds users", () => { seed([{ name: "baz" }]) })"#);
+        assert_eq!(dummy_values(&blocks[0]), vec!["baz"]);
+    }
+
+    // T-244: parenthesized direct expect argument → suppressed (parity with T-223)
+    #[test]
+    fn dummy_parenthesized_expect_arg_suppressed() {
+        let blocks = parse(r#"test("checks literal", () => { expect(("foo")).toBe(x) })"#);
+        assert!(blocks[0].dummy_literals.is_empty());
+    }
+
+    // T-245: spread argument carrying a dummy array → collected
+    #[test]
+    fn dummy_in_spread_argument() {
+        let blocks = parse(r#"test("creates a user", () => { createUser(...["foo"]) })"#);
+        assert_eq!(dummy_values(&blocks[0]), vec!["foo"]);
     }
 }

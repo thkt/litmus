@@ -4,8 +4,8 @@ pub mod rules;
 use parse::parse_test_file;
 use rules::{
     Issue, check_catch_only_assertion, check_catch_swallow, check_conditional_assertion,
-    check_empty_test, check_mock_only, check_mock_overuse, check_skipped_test, check_tautological,
-    check_test_name, check_weak_assertions,
+    check_dummy_data, check_empty_test, check_mock_only, check_mock_overuse, check_skipped_test,
+    check_tautological, check_test_name, check_weak_assertions,
 };
 use std::fmt;
 use std::fs;
@@ -30,6 +30,7 @@ const EXCLUDED_DIRS: &[&str] = &["node_modules", ".git", "dist", "build", "targe
 //   75 EX_TEMPFAIL   no retryable failure mode (local, deterministic analysis)
 //   104 UNKNOWN      anyhow::Error swallow fallback; litmus does not use anyhow
 pub const EXIT_SUCCESS: u8 = 0;
+pub const EXIT_WARNING: u8 = 1;
 pub const EXIT_BLOCKING: u8 = 2;
 pub const EXIT_USAGE: u8 = 64;
 pub const EXIT_SOFTWARE: u8 = 70;
@@ -154,6 +155,7 @@ pub fn analyze_files(files: &[PathBuf]) -> AnalysisResult {
         issues.extend(check_tautological(&blocks, file));
         issues.extend(check_mock_only(&blocks, file));
         issues.extend(check_test_name(&blocks, file));
+        issues.extend(check_dummy_data(&blocks, file));
     }
 
     AnalysisResult { issues, errors }
@@ -161,12 +163,15 @@ pub fn analyze_files(files: &[PathBuf]) -> AnalysisResult {
 
 #[cfg(test)]
 mod error_tests {
-    use super::{EXIT_BLOCKING, EXIT_SOFTWARE, EXIT_SUCCESS, EXIT_USAGE, LitmusError};
+    use super::{
+        EXIT_BLOCKING, EXIT_SOFTWARE, EXIT_SUCCESS, EXIT_USAGE, EXIT_WARNING, LitmusError,
+    };
 
-    // T-401: ADR-0066 Group 3 exit code constants
+    // T-401, T-406: ADR-0066 Group 3 exit code constants
     #[test]
     fn exit_codes_pinned_to_adr_0066_group_3() {
         assert_eq!(EXIT_SUCCESS, 0);
+        assert_eq!(EXIT_WARNING, 1);
         assert_eq!(EXIT_BLOCKING, 2);
         assert_eq!(EXIT_USAGE, 64);
         assert_eq!(EXIT_SOFTWARE, 70);

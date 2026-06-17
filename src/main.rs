@@ -1,4 +1,7 @@
-use litmus::{EXIT_BLOCKING, EXIT_SUCCESS, LitmusError, analyze_files, find_test_files};
+use litmus::rules::{Issue, Severity};
+use litmus::{
+    EXIT_BLOCKING, EXIT_SUCCESS, EXIT_WARNING, LitmusError, analyze_files, find_test_files,
+};
 use std::env;
 use std::panic::catch_unwind;
 use std::path::PathBuf;
@@ -43,7 +46,20 @@ fn run(args: &[String]) -> Result<u8, LitmusError> {
         println!("{issue}");
     }
 
-    Ok(EXIT_BLOCKING)
+    Ok(select_exit_code(&result.issues))
+}
+
+// A single blocking issue forces exit 2; otherwise warning-only issues yield
+// exit 1. EXIT_SUCCESS is handled earlier, before issues are printed.
+fn select_exit_code(issues: &[Issue]) -> u8 {
+    if issues
+        .iter()
+        .any(|issue| issue.severity() == Severity::Blocking)
+    {
+        EXIT_BLOCKING
+    } else {
+        EXIT_WARNING
+    }
 }
 
 fn parse_args(args: &[String]) -> Result<PathBuf, LitmusError> {
@@ -64,5 +80,35 @@ fn parse_args(args: &[String]) -> Result<PathBuf, LitmusError> {
             "expected at most 1 directory argument, got {}",
             many.len()
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EXIT_BLOCKING, EXIT_WARNING, Issue, select_exit_code};
+    use std::path::PathBuf;
+
+    fn issue(rule: &'static str) -> Issue {
+        Issue {
+            rule,
+            file: PathBuf::from("test.ts"),
+            line: 1,
+            test_name: "test case".to_owned(),
+            detail: String::new(),
+        }
+    }
+
+    // T-407: only warning-level issues → exit 1
+    #[test]
+    fn warning_only_exits_1() {
+        let issues = vec![issue("dummy-data")];
+        assert_eq!(select_exit_code(&issues), EXIT_WARNING);
+    }
+
+    // T-408: any blocking issue overrides warning → exit 2
+    #[test]
+    fn blocking_overrides_warning_exits_2() {
+        let issues = vec![issue("dummy-data"), issue("weak-assertion")];
+        assert_eq!(select_exit_code(&issues), EXIT_BLOCKING);
     }
 }
