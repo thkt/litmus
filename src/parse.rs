@@ -108,9 +108,9 @@ pub fn parse_test_file(source: &str, path: &Path) -> Result<Vec<TestBlock>, Stri
         SourceType::from_path(path).unwrap_or_else(|_| SourceType::from_path("test.ts").unwrap());
     let ret = Parser::new(&allocator, source, source_type).parse();
 
-    if !ret.errors.is_empty() {
+    if !ret.diagnostics.is_empty() {
         let msg = ret
-            .errors
+            .diagnostics
             .iter()
             .map(ToString::to_string)
             .collect::<Vec<_>>()
