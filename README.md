@@ -41,6 +41,7 @@ LLM-generated tests amplify this problem — they produce syntactically valid te
 | `mock-only`         | Tests verifying only mock interactions            | Only `toHaveBeenCalledWith` / `toHaveBeenCalledTimes` |
 | `test-name-quality` | Test names too vague to diagnose failures         | `"works"`, `"should work"`                            |
 | `missing-act`       | Tests asserting on arranged data with no SUT call | `const x = 42; expect(x).toBe(42)`                    |
+| `snapshot-external` | Tests asserting against an external snapshot file | `expect(html).toMatchSnapshot()`                      |
 
 Based on [javascript-testing-best-practices](https://github.com/goldbergyoni/javascript-testing-best-practices) by Yoni Goldberg.
 
@@ -65,7 +66,7 @@ test-name-quality: src/utils.test.ts:8 works (words: 1)
 | 64   | usage error (invalid CLI arguments)          |
 | 70   | internal error (panic / invariant violation) |
 
-Codes 64 and 70 follow [sysexits.h](https://man.openbsd.org/sysexits.3) conventions; codes 0/1/2 follow the hook-tool convention (pass / warn / block). Warn-level rules (`missing-act`, `dummy-data`) emit 1; all other rules emit 2. When both are present, 2 takes precedence.
+Codes 64 and 70 follow [sysexits.h](https://man.openbsd.org/sysexits.3) conventions; codes 0/1/2 follow the hook-tool convention (pass / warn / block). Warn-level rules (`missing-act`, `dummy-data`, `snapshot-external`) emit 1; all other rules emit 2. When both are present, 2 takes precedence.
 
 #### Installation
 

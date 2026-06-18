@@ -33,13 +33,14 @@ LLM生成テストはこの問題を増幅する — 構文的には正しいが
 
 #### litmus が検出するもの
 
-| ルール              | 検出内容                             | 例                                                    |
-| ------------------- | ------------------------------------ | ----------------------------------------------------- |
-| `weak-assertion`    | 弱いmatcherのみ、またはassertionなし | `expect(x).toBeTruthy()` が唯一のassertion            |
-| `mock-overuse`      | mock数がassertion数を超過            | `vi.fn()` が3つ、`expect` が1つ                       |
-| `tautological`      | リテラル値への常に通るassertion      | `expect(true).toBe(true)`                             |
-| `mock-only`         | mockの呼ばれ方だけを検証             | `toHaveBeenCalledWith` / `toHaveBeenCalledTimes` のみ |
-| `test-name-quality` | 失敗時に原因が分からないテスト名     | `"works"`, `"should work"`                            |
+| ルール              | 検出内容                              | 例                                                    |
+| ------------------- | ------------------------------------- | ----------------------------------------------------- |
+| `weak-assertion`    | 弱いmatcherのみ、またはassertionなし  | `expect(x).toBeTruthy()` が唯一のassertion            |
+| `mock-overuse`      | mock数がassertion数を超過             | `vi.fn()` が3つ、`expect` が1つ                       |
+| `tautological`      | リテラル値への常に通るassertion       | `expect(true).toBe(true)`                             |
+| `mock-only`         | mockの呼ばれ方だけを検証              | `toHaveBeenCalledWith` / `toHaveBeenCalledTimes` のみ |
+| `test-name-quality` | 失敗時に原因が分からないテスト名      | `"works"`, `"should work"`                            |
+| `snapshot-external` | 外部snapshotファイルに対するassertion | `expect(html).toMatchSnapshot()`                      |
 
 Yoni Goldberg著 [javascript-testing-best-practices](https://github.com/goldbergyoni/javascript-testing-best-practices) に基づく。
 
@@ -56,15 +57,15 @@ test-name-quality: src/utils.test.ts:8 works (words: 1)
 
 #### 終了コード
 
-| Code | 意味                                            |
-| ---- | ----------------------------------------------- |
-| 0    | クリーン (違反なし)                             |
-| 1    | 予約 (将来の warn レベルルール用)               |
-| 2    | issue 検出                                      |
-| 64   | usage エラー (CLI 引数が不正)                   |
-| 70   | 内部エラー (panic / invariant violation)        |
+| Code | 意味                                     |
+| ---- | ---------------------------------------- |
+| 0    | クリーン (違反なし)                      |
+| 1    | warn レベルの違反のみ (advisory)         |
+| 2    | blocking の違反を検出                    |
+| 64   | usage エラー (CLI 引数が不正)            |
+| 70   | 内部エラー (panic / invariant violation) |
 
-64 と 70 は [sysexits.h](https://man.openbsd.org/sysexits.3) 準拠、0/1/2 は hook ツールの慣例 (pass / warn / block)。現状 litmus は違反検出時に常に 2 を返し、1 は将来の warn レベルルール用に予約。
+64 と 70 は [sysexits.h](https://man.openbsd.org/sysexits.3) 準拠、0/1/2 は hook ツールの慣例 (pass / warn / block)。warn レベルのルール (`missing-act`, `dummy-data`, `snapshot-external`) は 1、それ以外のルールは 2 を返す。両方ある場合は 2 が優先。
 
 #### インストール
 

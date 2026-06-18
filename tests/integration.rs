@@ -538,3 +538,25 @@ fn exit_1_missing_act() {
     assert!(stdout.contains("missing-act"), "stdout: {stdout}");
     assert!(stdout.contains("noact.test.ts:1"), "stdout: {stdout}");
 }
+
+// T-421: an external snapshot assertion (toMatchSnapshot) → snapshot-external at
+// warning severity, exit 1. The render() Act call keeps missing-act silent.
+#[test]
+fn exit_1_snapshot_external() {
+    let dir = TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("snapshot.test.ts"),
+        r#"test("renders the user card markup", () => {
+    const html = render(user)
+    expect(html).toMatchSnapshot()
+})"#,
+    )
+    .unwrap();
+
+    let output = litmus(dir.path());
+    assert_eq!(output.status.code(), Some(1));
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("snapshot-external"), "stdout: {stdout}");
+    assert!(stdout.contains("snapshot.test.ts:3"), "stdout: {stdout}");
+}
