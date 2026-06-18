@@ -89,7 +89,12 @@ litmus ./src
 
 # CI で使う（非ゼロ終了でパイプラインをブロック）
 litmus . || exit 1
+
+# エージェントやツール向けの機械可読出力
+litmus --json ./src
 ```
+
+`--json` 指定時は stdout に `{"issues":[...],"errors":[...]}` の単一ドキュメントを出力し、CLI エラーは `next_step` と `candidates` を持つエラーオブジェクトを stderr に出す。終了コードは変わらない。早期に close する読み手へのパイプ（`litmus | head`）はクラッシュせず exit 0 で正常終了する。
 
 #### 対応ファイルパターン
 
