@@ -583,3 +583,139 @@ fn exit_1_snapshot_external() {
     assert!(stdout.contains("snapshot-external"), "stdout: {stdout}");
     assert!(stdout.contains("snapshot.test.ts:3"), "stdout: {stdout}");
 }
+
+// T-J09: --json with issues → stdout is a JSON document carrying the rule and
+// severity; exit code is unchanged (blocking → 2).
+#[test]
+fn json_mode_emits_issues_document() {
+    let dir = TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("weak.test.ts"),
+        r#"test("weak only", () => { expect(x).toBeTruthy() })"#,
+    )
+    .unwrap();
+
+    let output = litmus_cmd()
+        .arg("--json")
+        .arg(dir.path())
+        .output()
+        .expect("failed to run litmus");
+    assert_eq!(output.status.code(), Some(2));
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.starts_with(r#"{"issues":["#), "stdout: {stdout}");
+    assert!(
+        stdout.contains(r#""rule":"weak-assertion""#),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains(r#""severity":"blocking""#),
+        "stdout: {stdout}"
+    );
+    assert!(stdout.contains(r#""errors":[]"#), "stdout: {stdout}");
+    // stderr stays empty: the JSON document is the sole output stream.
+    assert!(output.stderr.is_empty(), "stderr: {:?}", output.stderr);
+}
+
+// T-J10: --json with no issues → empty arrays, exit 0.
+#[test]
+fn json_mode_clean_is_empty_arrays() {
+    let dir = TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("ok.test.ts"),
+        r#"test("returns the sum of two positive integers", () => {
+    const total = add(2, 3)
+    expect(total).toBe(5)
+})"#,
+    )
+    .unwrap();
+
+    let output = litmus_cmd()
+        .arg("--json")
+        .arg(dir.path())
+        .output()
+        .expect("failed to run litmus");
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(stdout.trim_end(), r#"{"issues":[],"errors":[]}"#);
+}
+
+// T-J11: --json with a parse error surfaces the error in the document, not on
+// stderr, while non-erroring files still report issues.
+#[test]
+fn json_mode_carries_file_errors() {
+    let dir = TempDir::new().unwrap();
+    fs::write(dir.path().join("broken.test.ts"), "test(\"x\", () => {").unwrap();
+
+    let output = litmus_cmd()
+        .arg("--json")
+        .arg(dir.path())
+        .output()
+        .expect("failed to run litmus");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains(r#""kind":"parse""#), "stdout: {stdout}");
+    assert!(stdout.contains("broken.test.ts"), "stdout: {stdout}");
+    assert!(
+        output.stderr.is_empty(),
+        "stderr should be empty in json mode"
+    );
+}
+
+// T-J12: --json on a usage error → error JSON on stderr with next_step +
+// candidates; exit 64.
+#[test]
+fn json_mode_usage_error_has_next_step() {
+    let output = litmus_cmd()
+        .arg("--json")
+        .arg("--bogus")
+        .output()
+        .expect("failed to run litmus");
+    assert_eq!(output.status.code(), Some(64));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains(r#""error":"usage""#), "stderr: {stderr}");
+    assert!(stderr.contains(r#""next_step":"#), "stderr: {stderr}");
+    assert!(
+        stderr.contains(r#""candidates":["--json"]"#),
+        "stderr: {stderr}"
+    );
+    assert!(output.stdout.is_empty(), "stdout should be empty on error");
+}
+
+// T-J13: a reader that closes early (BrokenPipe) does not crash litmus into the
+// internal-error exit (70); it stops cleanly at 0. Output is sized past the
+// pipe buffer so the writer is still writing when the reader closes.
+#[test]
+fn broken_pipe_does_not_panic() {
+    use std::io::Read;
+    use std::process::Stdio;
+
+    let dir = TempDir::new().unwrap();
+    let mut body = String::new();
+    for i in 0..4000 {
+        body.push_str(&format!(
+            "test(\"weak {i}\", () => {{ expect(x).toBeTruthy() }})\n"
+        ));
+    }
+    fs::write(dir.path().join("many.test.ts"), body).unwrap();
+
+    let mut child = litmus_cmd()
+        .arg(dir.path())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn litmus");
+
+    {
+        let mut out = child.stdout.take().unwrap();
+        let mut buf = [0u8; 64];
+        let _ = out.read(&mut buf);
+        // Dropping `out` closes the read end; further writes hit BrokenPipe.
+    }
+
+    let status = child.wait().expect("failed to wait on litmus");
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "broken pipe must stop cleanly, not exit 70"
+    );
+}

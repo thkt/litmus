@@ -90,7 +90,12 @@ litmus ./src
 
 # In CI (non-zero exit blocks the pipeline)
 litmus . || exit 1
+
+# Machine-readable output for agents and tooling
+litmus --json ./src
 ```
+
+With `--json`, stdout carries a single `{"issues":[...],"errors":[...]}` document and CLI errors print an error object with `next_step` and `candidates` to stderr. Exit codes are unchanged. Piping to a reader that closes early (`litmus | head`) stops cleanly at exit 0 instead of crashing.
 
 #### Supported file patterns
 
