@@ -20,7 +20,7 @@ pub enum Severity {
 // Rules whose findings are advisory (exit code 1) rather than blocking (exit 2).
 // Severity is a property of the rule, not of the individual finding, so it is
 // derived from the rule name rather than stored on every Issue.
-const WARNING_RULES: &[&str] = &["dummy-data", "missing-act"];
+const WARNING_RULES: &[&str] = &["dummy-data", "missing-act", "snapshot-external"];
 
 impl Issue {
     pub fn severity(&self) -> Severity {
@@ -320,6 +320,35 @@ pub fn check_missing_act(blocks: &[TestBlock], file: &Path) -> Vec<Issue> {
                 test_name: block.name.clone(),
                 detail: "assertions present but no Act (SUT call)".to_owned(),
             });
+        }
+    }
+    issues
+}
+
+// snapshot-external: a test asserts against an external snapshot file via
+// toMatchSnapshot() (js-testing-best-practices §1.8). The expected value lives
+// out of sight of the test, so a large external snapshot is a sign of a fragile
+// test whose failures read as an opaque diff far from the assertion site.
+// Advisory (WARNING) rather than blocking: a snapshot still verifies output, so
+// it is fragile rather than empty like the no-verify rules. toMatchInlineSnapshot
+// keeps the expected value beside the assertion and is intentionally not in the
+// flag set. The set is a named const so sibling external-snapshot matchers can
+// be added without touching the loop.
+const SNAPSHOT_MATCHERS: &[&str] = &["toMatchSnapshot"];
+
+pub fn check_snapshot_external(blocks: &[TestBlock], file: &Path) -> Vec<Issue> {
+    let mut issues = Vec::new();
+    for block in blocks {
+        for assertion in &block.assertions {
+            if SNAPSHOT_MATCHERS.contains(&assertion.matcher.as_str()) {
+                issues.push(Issue {
+                    rule: "snapshot-external",
+                    file: file.to_path_buf(),
+                    line: assertion.line,
+                    test_name: block.name.clone(),
+                    detail: format!("matcher: {}", assertion.matcher),
+                });
+            }
         }
     }
     issues
@@ -1018,6 +1047,79 @@ mod tests {
     fn missing_act_severity_is_warning() {
         let blocks = vec![act_block(false, &["x"], vec![strong_assertion()])];
         let issues = check_missing_act(&blocks, path());
+        assert_eq!(issues[0].severity(), Severity::Warning);
+    }
+
+    fn snapshot_assertion(matcher: &str, line: u32) -> Assertion {
+        Assertion {
+            line,
+            target: "x".into(),
+            target_kind: TargetKind::Identifier,
+            target_root: Some("x".into()),
+            matcher: matcher.into(),
+            is_weak: false,
+            context: AssertionContext::TopLevel,
+        }
+    }
+
+    // T-416: toMatchSnapshot flagged, reported at the assertion line with the
+    // matcher in the detail.
+    #[test]
+    fn snapshot_external_detects_to_match_snapshot() {
+        let blocks = vec![block(
+            vec![snapshot_assertion("toMatchSnapshot", 7)],
+            vec![],
+        )];
+        let issues = check_snapshot_external(&blocks, path());
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].rule, "snapshot-external");
+        assert_eq!(issues[0].line, 7);
+        assert_eq!(issues[0].detail, "matcher: toMatchSnapshot");
+    }
+
+    // T-417: inline snapshot keeps the value beside the assertion, so it is not
+    // flagged.
+    #[test]
+    fn snapshot_external_ignores_inline_snapshot() {
+        let blocks = vec![block(
+            vec![snapshot_assertion("toMatchInlineSnapshot", 2)],
+            vec![],
+        )];
+        let issues = check_snapshot_external(&blocks, path());
+        assert_eq!(issues.len(), 0);
+    }
+
+    // T-418: a non-snapshot matcher is left to the other rules.
+    #[test]
+    fn snapshot_external_ignores_regular_matcher() {
+        let blocks = vec![block(vec![strong_assertion()], vec![])];
+        let issues = check_snapshot_external(&blocks, path());
+        assert_eq!(issues.len(), 0);
+    }
+
+    // T-419: each snapshot assertion in a block yields its own finding.
+    #[test]
+    fn snapshot_external_reports_each_assertion() {
+        let blocks = vec![block(
+            vec![
+                snapshot_assertion("toMatchSnapshot", 3),
+                snapshot_assertion("toMatchSnapshot", 5),
+            ],
+            vec![],
+        )];
+        let issues = check_snapshot_external(&blocks, path());
+        assert_eq!(issues.len(), 2);
+        assert_eq!(issues[1].line, 5);
+    }
+
+    // T-420: snapshot-external is advisory (a snapshot still verifies output).
+    #[test]
+    fn snapshot_external_severity_is_warning() {
+        let blocks = vec![block(
+            vec![snapshot_assertion("toMatchSnapshot", 2)],
+            vec![],
+        )];
+        let issues = check_snapshot_external(&blocks, path());
         assert_eq!(issues[0].severity(), Severity::Warning);
     }
 }

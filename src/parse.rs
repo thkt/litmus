@@ -1001,6 +1001,23 @@ describe("outer", () => {
         assert!(!blocks[0].assertions[0].is_weak);
     }
 
+    // T-414: external snapshot matcher captured verbatim, so snapshot-external
+    // can key on the matcher name. is_weak stays false (a snapshot still asserts).
+    #[test]
+    fn captures_to_match_snapshot_matcher() {
+        let blocks = parse(r#"test("x", () => { expect(x).toMatchSnapshot() })"#);
+        assert_eq!(blocks[0].assertions[0].matcher, "toMatchSnapshot");
+        assert!(!blocks[0].assertions[0].is_weak);
+    }
+
+    // T-415: inline snapshot matcher is a distinct name, so it falls outside the
+    // snapshot-external flag set without any special-case handling.
+    #[test]
+    fn captures_to_match_inline_snapshot_matcher() {
+        let blocks = parse(r#"test("x", () => { expect(x).toMatchInlineSnapshot(`1`) })"#);
+        assert_eq!(blocks[0].assertions[0].matcher, "toMatchInlineSnapshot");
+    }
+
     // T-006: mixed weak and strong
     #[test]
     fn mixed_weak_and_strong() {
