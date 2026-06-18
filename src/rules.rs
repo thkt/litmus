@@ -20,7 +20,7 @@ pub enum Severity {
 // Rules whose findings are advisory (exit code 1) rather than blocking (exit 2).
 // Severity is a property of the rule, not of the individual finding, so it is
 // derived from the rule name rather than stored on every Issue.
-const WARNING_RULES: &[&str] = &["dummy-data"];
+const WARNING_RULES: &[&str] = &["dummy-data", "missing-act"];
 
 impl Issue {
     pub fn severity(&self) -> Severity {
@@ -286,6 +286,45 @@ pub fn check_dummy_data(blocks: &[TestBlock], file: &Path) -> Vec<Issue> {
     issues
 }
 
+// missing-act: a test arranges data locally but never invokes production code
+// (js-testing-best-practices §1.2, the "Act" of Arrange-Act-Assert). Advisory
+// (WARNING) because act detection is heuristic. Precision gates keep false
+// positives down:
+//   - no Act call anywhere in the body.
+//   - a strong, non-literal assertion whose root identifier is a name the body
+//     bound locally. Requiring the assertion to target arranged data (not a
+//     hook-sourced value) is what separates the fake test `const x = 42;
+//     expect(x).toBe(42)` from a well-structured test that asserts on a value
+//     produced in beforeEach. Weak-only bodies belong to weak-assertion and
+//     literal-target bodies to tautological, so neither fires here.
+// Known limitation: an Act hidden in a computed object key (`{ [act()]: 1 }`)
+// is not seen, so such a body could still fire. Rare; acceptable for v1.
+pub fn check_missing_act(blocks: &[TestBlock], file: &Path) -> Vec<Issue> {
+    let mut issues = Vec::new();
+    for block in blocks {
+        if block.has_empty_body || block.has_act {
+            continue;
+        }
+        let asserts_arranged = block.assertions.iter().any(|a| {
+            !a.is_weak
+                && a.target_kind != TargetKind::Literal
+                && a.target_root
+                    .as_ref()
+                    .is_some_and(|root| block.bound_names.iter().any(|n| n == root))
+        });
+        if asserts_arranged {
+            issues.push(Issue {
+                rule: "missing-act",
+                file: file.to_path_buf(),
+                line: block.line,
+                test_name: block.name.clone(),
+                detail: "assertions present but no Act (SUT call)".to_owned(),
+            });
+        }
+    }
+    issues
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -303,6 +342,8 @@ mod tests {
             mock_calls: mocks,
             modifier: None,
             has_empty_body: false,
+            has_act: true,
+            bound_names: Vec::new(),
             catch_swallows: Vec::new(),
             dummy_literals: Vec::new(),
         }
@@ -313,6 +354,7 @@ mod tests {
             line: 2,
             target: "x".into(),
             target_kind: TargetKind::Identifier,
+            target_root: Some("x".into()),
             matcher: matcher.into(),
             is_weak: true,
             context: AssertionContext::TopLevel,
@@ -324,6 +366,7 @@ mod tests {
             line: 2,
             target: "x".into(),
             target_kind: TargetKind::Identifier,
+            target_root: Some("x".into()),
             matcher: "toBe".into(),
             is_weak: false,
             context: AssertionContext::TopLevel,
@@ -441,6 +484,7 @@ mod tests {
             line: 2,
             target: target.into(),
             target_kind: TargetKind::Literal,
+            target_root: None,
             matcher: "toBe".into(),
             is_weak: false,
             context: AssertionContext::TopLevel,
@@ -452,6 +496,7 @@ mod tests {
             line: 2,
             target: "mockFn".into(),
             target_kind: TargetKind::Identifier,
+            target_root: Some("mockFn".into()),
             matcher: matcher.into(),
             is_weak: false,
             context: AssertionContext::TopLevel,
@@ -543,6 +588,8 @@ mod tests {
             mock_calls: vec![],
             modifier: None,
             has_empty_body: false,
+            has_act: true,
+            bound_names: Vec::new(),
             catch_swallows: Vec::new(),
             dummy_literals: Vec::new(),
         }
@@ -627,6 +674,8 @@ mod tests {
             mock_calls: vec![],
             modifier: None,
             has_empty_body: true,
+            has_act: false,
+            bound_names: Vec::new(),
             catch_swallows: Vec::new(),
             dummy_literals: Vec::new(),
         }
@@ -640,6 +689,8 @@ mod tests {
             mock_calls: vec![],
             modifier: Some(modifier),
             has_empty_body: false,
+            has_act: true,
+            bound_names: Vec::new(),
             catch_swallows: Vec::new(),
             dummy_literals: Vec::new(),
         }
@@ -650,6 +701,7 @@ mod tests {
             line: 2,
             target: "x".into(),
             target_kind: TargetKind::Identifier,
+            target_root: Some("x".into()),
             matcher: "toBe".into(),
             is_weak: false,
             context,
@@ -817,6 +869,8 @@ mod tests {
             mock_calls: vec![],
             modifier: None,
             has_empty_body: false,
+            has_act: true,
+            bound_names: Vec::new(),
             catch_swallows: Vec::new(),
             dummy_literals: dummies,
         }
@@ -881,5 +935,89 @@ mod tests {
                 "rule {rule} should warn"
             );
         }
+    }
+
+    // Builds a block that binds the given names but makes no SUT call
+    // (has_act false) — the shape check_missing_act targets. The assertion
+    // helpers target "x", so bind "x" to model arranged-and-asserted data.
+    fn act_block(has_act: bool, bound: &[&str], assertions: Vec<Assertion>) -> TestBlock {
+        TestBlock {
+            name: "test case".into(),
+            line: 1,
+            assertions,
+            mock_calls: Vec::new(),
+            modifier: None,
+            has_empty_body: false,
+            has_act,
+            bound_names: bound.iter().map(|s| (*s).to_owned()).collect(),
+            catch_swallows: Vec::new(),
+            dummy_literals: Vec::new(),
+        }
+    }
+
+    // T-240: local arrange + strong assertion on the bound name + no Act → issue
+    #[test]
+    fn missing_act_arrange_only_detected() {
+        let blocks = vec![act_block(false, &["x"], vec![strong_assertion()])];
+        let issues = check_missing_act(&blocks, path());
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].rule, "missing-act");
+        assert!(issues[0].detail.contains("no Act"));
+    }
+
+    // T-241: an Act call present → no issue
+    #[test]
+    fn missing_act_with_act_no_issue() {
+        let blocks = vec![act_block(true, &["x"], vec![strong_assertion()])];
+        let issues = check_missing_act(&blocks, path());
+        assert_eq!(issues.len(), 0);
+    }
+
+    // T-242: no local binding (arrange/act live in setup hooks) → no issue
+    #[test]
+    fn missing_act_no_local_binding_no_issue() {
+        let blocks = vec![act_block(false, &[], vec![strong_assertion()])];
+        let issues = check_missing_act(&blocks, path());
+        assert_eq!(issues.len(), 0);
+    }
+
+    // T-247: assertion targets a hook-sourced value, not the local binding →
+    // no issue (the binding and the assertion target are decoupled).
+    #[test]
+    fn missing_act_assertion_targets_unbound_name_no_issue() {
+        let blocks = vec![act_block(false, &["expected"], vec![strong_assertion()])];
+        let issues = check_missing_act(&blocks, path());
+        assert_eq!(issues.len(), 0);
+    }
+
+    // T-243: weak-only assertion defers to weak-assertion → no issue
+    #[test]
+    fn missing_act_weak_only_defers() {
+        let blocks = vec![act_block(false, &["x"], vec![weak_assertion("toBeTruthy")])];
+        let issues = check_missing_act(&blocks, path());
+        assert_eq!(issues.len(), 0);
+    }
+
+    // T-244: literal-target assertion defers to tautological → no issue
+    #[test]
+    fn missing_act_literal_target_defers() {
+        let blocks = vec![act_block(false, &["lit"], vec![literal_assertion("42")])];
+        let issues = check_missing_act(&blocks, path());
+        assert_eq!(issues.len(), 0);
+    }
+
+    // T-245: empty body → no issue
+    #[test]
+    fn missing_act_empty_body_no_issue() {
+        let issues = check_missing_act(&[empty_block()], path());
+        assert_eq!(issues.len(), 0);
+    }
+
+    // T-246: missing-act is warning severity
+    #[test]
+    fn missing_act_severity_is_warning() {
+        let blocks = vec![act_block(false, &["x"], vec![strong_assertion()])];
+        let issues = check_missing_act(&blocks, path());
+        assert_eq!(issues[0].severity(), Severity::Warning);
     }
 }
