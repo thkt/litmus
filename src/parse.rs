@@ -1923,4 +1923,157 @@ describe("outer", () => {
         assert_eq!(safe[0].assertions[0].target_root.as_deref(), Some("result"));
         assert!(!safe[0].bound_names.iter().any(|n| n == "result"));
     }
+
+    fn parse_ts(source: &str) -> Vec<TestBlock> {
+        parse_test_file(source, Path::new("test.ts")).unwrap()
+    }
+
+    // T-289: a non-null assertion in the target unwraps to its root identifier
+    #[test]
+    fn target_root_through_non_null() {
+        let blocks = parse(r#"test("x", () => { expect(user!.name).toBe("a") })"#);
+        assert_eq!(blocks[0].assertions[0].target_root.as_deref(), Some("user"));
+    }
+
+    // T-290: a TS `as` cast in the target unwraps to its root identifier
+    #[test]
+    fn target_root_through_as_cast() {
+        let blocks = parse(r#"test("x", () => { expect((x as Foo).bar).toBe(1) })"#);
+        assert_eq!(blocks[0].assertions[0].target_root.as_deref(), Some("x"));
+    }
+
+    // T-291: an unrecognized `vi.*` setup call is treated as an Act, not a mock
+    #[test]
+    fn unknown_vi_call_is_act() {
+        let blocks = parse(r#"test("x", () => { vi.useFakeTimers(); expect(x).toBe(1) })"#);
+        assert!(blocks[0].has_act);
+        assert!(blocks[0].mock_calls.is_empty());
+    }
+
+    // T-292: an object-rest binding collects the rest name
+    #[test]
+    fn bound_names_object_rest() {
+        let blocks = parse(r#"test("x", () => { const { a, ...rest } = obj })"#);
+        assert_eq!(blocks[0].bound_names, vec!["a", "rest"]);
+    }
+
+    // T-293: an array-rest binding collects the rest name
+    #[test]
+    fn bound_names_array_rest() {
+        let blocks = parse(r#"test("x", () => { const [first, ...others] = arr })"#);
+        assert_eq!(blocks[0].bound_names, vec!["first", "others"]);
+    }
+
+    // T-294: a destructuring default value collects the bound name
+    #[test]
+    fn bound_names_assignment_pattern() {
+        let blocks = parse(r#"test("x", () => { const { a = 1 } = obj })"#);
+        assert_eq!(blocks[0].bound_names, vec!["a"]);
+    }
+
+    // T-295: a call inside a throw argument is an Act
+    #[test]
+    fn has_act_true_for_throw_argument() {
+        let blocks = parse(r#"test("x", () => { if (cond) throw boom(); expect(x).toBe(1) })"#);
+        assert!(blocks[0].has_act);
+    }
+
+    // T-296: an empty statement contributes no Act
+    #[test]
+    fn has_act_false_for_empty_statement() {
+        let blocks = parse(r#"test("x", () => { ; const v = 1; expect(v).toBe(1) })"#);
+        assert!(!blocks[0].has_act);
+    }
+
+    // T-297: a call behind a unary operator is an Act
+    #[test]
+    fn has_act_true_for_unary_operand_call() {
+        let blocks = parse(r#"test("x", () => { const r = !isReady(); expect(r).toBe(false) })"#);
+        assert!(blocks[0].has_act);
+    }
+
+    // T-298: a call on a side of a logical expression is an Act
+    #[test]
+    fn has_act_true_for_logical_operand_call() {
+        let blocks = parse(r#"test("x", () => { const r = a || compute(); expect(r).toBe(1) })"#);
+        assert!(blocks[0].has_act);
+    }
+
+    // T-299: a call inside a sequence expression is an Act
+    #[test]
+    fn has_act_true_for_sequence_call() {
+        let blocks = parse(r#"test("x", () => { const r = (setup(), 42); expect(r).toBe(42) })"#);
+        assert!(blocks[0].has_act);
+    }
+
+    // T-300: a call interpolated into a template literal is an Act
+    #[test]
+    fn has_act_true_for_template_interpolation_call() {
+        let blocks = parse(r#"test("x", () => { const s = `${makeId()}`; expect(s).toBe("1") })"#);
+        assert!(blocks[0].has_act);
+    }
+
+    // T-301: a call behind a `satisfies` expression is an Act
+    #[test]
+    fn has_act_true_for_satisfies_call() {
+        let blocks =
+            parse(r#"test("x", () => { const r = run() satisfies Foo; expect(r).toBe(1) })"#);
+        assert!(blocks[0].has_act);
+    }
+
+    // T-302: a call behind a non-null assertion is an Act
+    #[test]
+    fn has_act_true_for_non_null_call() {
+        let blocks = parse(r#"test("x", () => { const r = run()!; expect(r).toBe(1) })"#);
+        assert!(blocks[0].has_act);
+    }
+
+    // T-303: a call behind an angle-bracket type assertion is an Act
+    #[test]
+    fn has_act_true_for_type_assertion_call() {
+        let blocks = parse_ts(r#"test("x", () => { const r = <number>run(); expect(r).toBe(1) })"#);
+        assert!(blocks[0].has_act);
+    }
+
+    // T-304: a call on a member chain head reached via optional chaining is an Act
+    #[test]
+    fn has_act_true_for_optional_static_member_call() {
+        let blocks = parse(r#"test("x", () => { const r = make()?.prop; expect(r).toBe(1) })"#);
+        assert!(blocks[0].has_act);
+    }
+
+    // T-305: a call on a computed-member chain head reached via optional chaining is an Act
+    #[test]
+    fn has_act_true_for_optional_computed_member_call() {
+        let blocks = parse(r#"test("x", () => { const r = arr()?.[0]; expect(r).toBe(1) })"#);
+        assert!(blocks[0].has_act);
+    }
+
+    // T-306: a call inside a spread argument is an Act
+    #[test]
+    fn has_act_true_for_spread_argument_call() {
+        let blocks = parse(r#"test("x", () => { const r = wrap(...gen()); expect(r).toBe(1) })"#);
+        assert!(blocks[0].has_act);
+    }
+
+    // T-307: a call inside an array spread element is an Act
+    #[test]
+    fn has_act_true_for_array_spread_call() {
+        let blocks = parse(r#"test("x", () => { const xs = [...gen()]; expect(xs[0]).toBe(1) })"#);
+        assert!(blocks[0].has_act);
+    }
+
+    // T-308: an array elision is skipped while a sibling call is still an Act
+    #[test]
+    fn has_act_true_with_array_elision() {
+        let blocks = parse(r#"test("x", () => { const xs = [, run()]; expect(xs[1]).toBe(1) })"#);
+        assert!(blocks[0].has_act);
+    }
+
+    // T-309: a call inside an object spread property is an Act
+    #[test]
+    fn has_act_true_for_object_spread_call() {
+        let blocks = parse(r#"test("x", () => { const o = { ...gen() }; expect(o.a).toBe(1) })"#);
+        assert!(blocks[0].has_act);
+    }
 }
