@@ -211,6 +211,28 @@ pub fn check_catch_swallow(blocks: &[TestBlock], file: &Path) -> Vec<Issue> {
     issues
 }
 
+// catch-masks-assertion: a try block asserts, and the catch block also asserts
+// without rethrowing, so the try assertion's thrown AssertionError is swallowed
+// and replaced by a passing catch assertion — the test passes even when the try
+// assertion fails (js-testing-best-practices §1.10). Disjoint from catch-swallow
+// (catch has no assertion) and catch-only-assertion (try has no assertion).
+pub fn check_catch_masks_assertion(blocks: &[TestBlock], file: &Path) -> Vec<Issue> {
+    let mut issues = Vec::new();
+    for block in blocks {
+        for &catch_line in &block.catch_masks {
+            issues.push(Issue {
+                rule: "catch-masks-assertion",
+                file: file.to_path_buf(),
+                line: catch_line,
+                test_name: block.name.clone(),
+                detail: "try assertion swallowed by catch; use .toThrow()/.rejects.toThrow()"
+                    .to_owned(),
+            });
+        }
+    }
+    issues
+}
+
 pub fn check_conditional_assertion(blocks: &[TestBlock], file: &Path) -> Vec<Issue> {
     let mut issues = Vec::new();
     for block in blocks {
@@ -374,6 +396,7 @@ mod tests {
             has_act: true,
             bound_names: Vec::new(),
             catch_swallows: Vec::new(),
+            catch_masks: Vec::new(),
             dummy_literals: Vec::new(),
         }
     }
@@ -620,6 +643,7 @@ mod tests {
             has_act: true,
             bound_names: Vec::new(),
             catch_swallows: Vec::new(),
+            catch_masks: Vec::new(),
             dummy_literals: Vec::new(),
         }
     }
@@ -706,6 +730,7 @@ mod tests {
             has_act: false,
             bound_names: Vec::new(),
             catch_swallows: Vec::new(),
+            catch_masks: Vec::new(),
             dummy_literals: Vec::new(),
         }
     }
@@ -721,6 +746,7 @@ mod tests {
             has_act: true,
             bound_names: Vec::new(),
             catch_swallows: Vec::new(),
+            catch_masks: Vec::new(),
             dummy_literals: Vec::new(),
         }
     }
@@ -804,6 +830,26 @@ mod tests {
     fn catch_swallow_empty_no_issue() {
         let blocks = vec![block(vec![strong_assertion()], vec![])];
         let issues = check_catch_swallow(&blocks, path());
+        assert_eq!(issues.len(), 0);
+    }
+
+    // T-209b: catch_masks non-empty → catch-masks-assertion, blocking severity
+    #[test]
+    fn catch_masks_assertion_detected() {
+        let mut b = block(vec![strong_assertion()], vec![]);
+        b.catch_masks = vec![7];
+        let issues = check_catch_masks_assertion(&[b], path());
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].rule, "catch-masks-assertion");
+        assert_eq!(issues[0].line, 7);
+        assert_eq!(issues[0].severity(), Severity::Blocking);
+    }
+
+    // T-209c: catch_masks empty → no issue
+    #[test]
+    fn catch_masks_assertion_empty_no_issue() {
+        let blocks = vec![block(vec![strong_assertion()], vec![])];
+        let issues = check_catch_masks_assertion(&blocks, path());
         assert_eq!(issues.len(), 0);
     }
 
@@ -901,6 +947,7 @@ mod tests {
             has_act: true,
             bound_names: Vec::new(),
             catch_swallows: Vec::new(),
+            catch_masks: Vec::new(),
             dummy_literals: dummies,
         }
     }
@@ -980,6 +1027,7 @@ mod tests {
             has_act,
             bound_names: bound.iter().map(|s| (*s).to_owned()).collect(),
             catch_swallows: Vec::new(),
+            catch_masks: Vec::new(),
             dummy_literals: Vec::new(),
         }
     }

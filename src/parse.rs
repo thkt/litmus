@@ -40,6 +40,13 @@ pub struct TestBlock {
     /// body from data whose arrange/act lives in setup hooks.
     pub bound_names: Vec<String>,
     pub catch_swallows: Vec<u32>,
+    /// Catch-handler lines where the try block contains an assertion and the
+    /// catch block also asserts without rethrowing. The try assertion's
+    /// AssertionError is swallowed and replaced by a passing catch assertion,
+    /// so the test passes even when the try assertion fails
+    /// (js-testing-best-practices §1.10). Disjoint from catch_swallows (catch
+    /// has no assertion) and catch-only-assertion (try has no assertion).
+    pub catch_masks: Vec<u32>,
     pub dummy_literals: Vec<DummyLiteral>,
 }
 
@@ -153,6 +160,7 @@ fn check_test_call(expr: &Expression<'_>, source: &str, blocks: &mut Vec<TestBlo
                         has_act: false,
                         bound_names: Vec::new(),
                         catch_swallows: Vec::new(),
+                        catch_masks: Vec::new(),
                         dummy_literals: Vec::new(),
                     });
                 }
@@ -197,6 +205,7 @@ fn extract_test_block(call: &CallExpression<'_>, source: &str) -> Option<TestBlo
     let mut assertions = Vec::new();
     let mut mock_calls = Vec::new();
     let mut catch_swallows = Vec::new();
+    let mut catch_masks = Vec::new();
     let mut dummy_literals = Vec::new();
     scan_body(
         &body.statements,
@@ -204,6 +213,7 @@ fn extract_test_block(call: &CallExpression<'_>, source: &str) -> Option<TestBlo
         &mut assertions,
         &mut mock_calls,
         &mut catch_swallows,
+        &mut catch_masks,
         &mut dummy_literals,
         AssertionContext::TopLevel,
     );
@@ -218,6 +228,7 @@ fn extract_test_block(call: &CallExpression<'_>, source: &str) -> Option<TestBlo
         has_act,
         bound_names,
         catch_swallows,
+        catch_masks,
         dummy_literals,
     })
 }
@@ -237,12 +248,17 @@ fn callback_body<'a>(args: &'a [Argument<'a>]) -> Option<&'a FunctionBody<'a>> {
     }
 }
 
+// Output sinks (assertions / mocks / catch_swallows / catch_masks / dummies)
+// are threaded as explicit parameters, matching the established style; the
+// count sits one over clippy's default after adding catch_masks.
+#[allow(clippy::too_many_arguments)]
 fn scan_body(
     stmts: &[Statement<'_>],
     source: &str,
     assertions: &mut Vec<Assertion>,
     mocks: &mut Vec<MockCall>,
     catch_swallows: &mut Vec<u32>,
+    catch_masks: &mut Vec<u32>,
     dummies: &mut Vec<DummyLiteral>,
     context: AssertionContext,
 ) {
@@ -253,18 +269,21 @@ fn scan_body(
             assertions,
             mocks,
             catch_swallows,
+            catch_masks,
             dummies,
             &context,
         );
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn scan_statement(
     stmt: &Statement<'_>,
     source: &str,
     assertions: &mut Vec<Assertion>,
     mocks: &mut Vec<MockCall>,
     catch_swallows: &mut Vec<u32>,
+    catch_masks: &mut Vec<u32>,
     dummies: &mut Vec<DummyLiteral>,
     context: &AssertionContext,
 ) {
@@ -294,6 +313,7 @@ fn scan_statement(
                 assertions,
                 mocks,
                 catch_swallows,
+                catch_masks,
                 dummies,
                 *context,
             );
@@ -305,6 +325,7 @@ fn scan_statement(
                 assertions,
                 mocks,
                 catch_swallows,
+                catch_masks,
                 dummies,
                 &AssertionContext::IfBranch,
             );
@@ -315,6 +336,7 @@ fn scan_statement(
                     assertions,
                     mocks,
                     catch_swallows,
+                    catch_masks,
                     dummies,
                     &AssertionContext::IfBranch,
                 );
@@ -327,6 +349,7 @@ fn scan_statement(
                 assertions,
                 mocks,
                 catch_swallows,
+                catch_masks,
                 dummies,
                 context,
             );
@@ -338,6 +361,7 @@ fn scan_statement(
                 assertions,
                 mocks,
                 catch_swallows,
+                catch_masks,
                 dummies,
                 context,
             );
@@ -349,6 +373,7 @@ fn scan_statement(
                 assertions,
                 mocks,
                 catch_swallows,
+                catch_masks,
                 dummies,
                 context,
             );
@@ -360,6 +385,7 @@ fn scan_statement(
                 assertions,
                 mocks,
                 catch_swallows,
+                catch_masks,
                 dummies,
                 context,
             );
@@ -371,6 +397,7 @@ fn scan_statement(
                 assertions,
                 mocks,
                 catch_swallows,
+                catch_masks,
                 dummies,
                 context,
             );
@@ -382,6 +409,7 @@ fn scan_statement(
                 assertions,
                 mocks,
                 catch_swallows,
+                catch_masks,
                 dummies,
                 context,
             );
@@ -394,6 +422,7 @@ fn scan_statement(
                     assertions,
                     mocks,
                     catch_swallows,
+                    catch_masks,
                     dummies,
                     *context,
                 );
@@ -403,21 +432,52 @@ fn scan_statement(
     }
 }
 
+// True when an assertion appears as a direct (top-level) statement of the try
+// block. Used by catch-masks to decide whether the try contributes an
+// AssertionError the catch could swallow. Nested control flow is intentionally
+// excluded for consistency with the top-level catch rethrow check.
+fn try_block_has_top_level_assertion(body: &[Statement<'_>], source: &str) -> bool {
+    body.iter().any(|stmt| {
+        let Statement::ExpressionStatement(es) = stmt else {
+            return false;
+        };
+        let mut probe = Vec::new();
+        let mut throwaway_mocks = Vec::new();
+        scan_expr(
+            &es.expression,
+            source,
+            &mut probe,
+            &mut throwaway_mocks,
+            &AssertionContext::TryBlock,
+        );
+        !probe.is_empty()
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
 fn scan_try_statement(
     try_stmt: &TryStatement<'_>,
     source: &str,
     assertions: &mut Vec<Assertion>,
     mocks: &mut Vec<MockCall>,
     catch_swallows: &mut Vec<u32>,
+    catch_masks: &mut Vec<u32>,
     dummies: &mut Vec<DummyLiteral>,
     context: &AssertionContext,
 ) {
+    // catch-masks judges only top-level try assertions, mirroring the top-level
+    // rethrow check on the catch. An assertion inside a nested try-catch is
+    // shielded by that inner catch and never reaches this catch, so a delta over
+    // the body-wide flattened vec (which scan_body bubbles inner assertions into)
+    // would misfire on the outer catch.
+    let try_has_assertion = try_block_has_top_level_assertion(&try_stmt.block.body, source);
     scan_body(
         &try_stmt.block.body,
         source,
         assertions,
         mocks,
         catch_swallows,
+        catch_masks,
         dummies,
         AssertionContext::TryBlock,
     );
@@ -434,18 +494,26 @@ fn scan_try_statement(
                     &mut catch_assertions,
                     mocks,
                     catch_swallows,
+                    catch_masks,
                     dummies,
                     &AssertionContext::CatchBlock,
                 );
             }
-            if catch_assertions.is_empty()
-                && !handler
-                    .body
-                    .body
-                    .iter()
-                    .any(|s| matches!(s, Statement::ThrowStatement(_)))
-            {
+            // A top-level rethrow lets the try AssertionError propagate, so the
+            // catch neither swallows nor masks it.
+            let catch_rethrows = handler
+                .body
+                .body
+                .iter()
+                .any(|s| matches!(s, Statement::ThrowStatement(_)));
+            if catch_assertions.is_empty() && !catch_rethrows {
                 catch_swallows.push(offset_to_line(source, handler.span.start));
+            }
+            // catch-masks: try asserts, catch asserts, catch does not rethrow.
+            // The try AssertionError is swallowed and replaced by a passing
+            // catch assertion (js-testing-best-practices §1.10).
+            if try_has_assertion && !catch_assertions.is_empty() && !catch_rethrows {
+                catch_masks.push(offset_to_line(source, handler.span.start));
             }
             assertions.extend(catch_assertions);
         }
@@ -458,6 +526,7 @@ fn scan_try_statement(
             assertions,
             mocks,
             catch_swallows,
+            catch_masks,
             dummies,
             *context,
         );
@@ -1556,6 +1625,94 @@ describe("outer", () => {
         let blocks = parse(source);
         assert_eq!(blocks[0].assertions.len(), 1);
         assert_eq!(blocks[0].assertions[0].context, AssertionContext::TopLevel);
+        assert_eq!(blocks[0].catch_swallows.len(), 1);
+    }
+
+    // T-124: try asserts, catch asserts, no rethrow → catch_masks has entry
+    #[test]
+    fn catch_masks_try_and_catch_assert() {
+        let source = r#"test("x", () => {
+            try {
+                expect(actual).toBe(expected)
+            } catch (e) {
+                expect(e).toBeDefined()
+            }
+        })"#;
+        let blocks = parse(source);
+        assert_eq!(blocks[0].catch_masks.len(), 1);
+    }
+
+    // T-125: try asserts, catch asserts but rethrows → no mask (error propagates)
+    #[test]
+    fn catch_masks_empty_when_catch_rethrows() {
+        let source = r#"test("x", () => {
+            try {
+                expect(actual).toBe(expected)
+            } catch (e) {
+                expect(e).toBeDefined()
+                throw e
+            }
+        })"#;
+        let blocks = parse(source);
+        assert!(blocks[0].catch_masks.is_empty());
+    }
+
+    // T-126: try has no assertion, catch asserts → no mask (catch-only-assertion's
+    // territory, not a swallowed try assertion)
+    #[test]
+    fn catch_masks_empty_when_try_has_no_assertion() {
+        let source = r#"test("x", () => {
+            try {
+                riskyOp()
+            } catch (e) {
+                expect(e).toBeDefined()
+            }
+        })"#;
+        let blocks = parse(source);
+        assert!(blocks[0].catch_masks.is_empty());
+    }
+
+    // T-127: try asserts, catch has no assertion → no mask (catch-swallow's territory)
+    #[test]
+    fn catch_masks_empty_when_catch_has_no_assertion() {
+        let source = r#"test("x", () => {
+            try {
+                expect(actual).toBe(expected)
+            } catch (e) {}
+        })"#;
+        let blocks = parse(source);
+        assert!(blocks[0].catch_masks.is_empty());
+    }
+
+    // T-128: sibling try-catch (try-assert/catch-empty + try-empty/catch-assert) →
+    // no mask, since neither pair has both a try assertion and a catch assertion
+    #[test]
+    fn catch_masks_empty_for_sibling_try_catch() {
+        let source = r#"test("x", () => {
+            try { expect(a).toBe(1) } catch (e) {}
+            try { riskyOp() } catch (e) { expect(e).toBeDefined() }
+        })"#;
+        let blocks = parse(source);
+        assert!(blocks[0].catch_masks.is_empty());
+    }
+
+    // T-129: nested try-catch whose inner catch is empty, wrapped by an outer
+    // catch that asserts. The inner try assertion is shielded by the inner
+    // catch, so it never reaches the outer catch; the outer try has no top-level
+    // assertion → catch_masks empty, and the inner empty catch is catch-swallow.
+    #[test]
+    fn catch_masks_empty_for_nested_shielded_try() {
+        let source = r#"test("x", () => {
+            try {
+                try {
+                    expect(actual).toBe(expected)
+                } catch (inner) {}
+            } catch (outer) {
+                expect(outer).toBeDefined()
+            }
+        })"#;
+        let blocks = parse(source);
+        assert!(blocks[0].catch_masks.is_empty());
         assert_eq!(blocks[0].catch_swallows.len(), 1);
     }
 

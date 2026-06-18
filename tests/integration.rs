@@ -304,6 +304,29 @@ fn detects_catch_swallow() {
     assert!(stdout.contains("catch-swallow"), "stdout: {stdout}");
 }
 
+// T-I1: try assertion swallowed by catch assertion → catch-masks-assertion, exit 2
+#[test]
+fn detects_catch_masks_assertion() {
+    let dir = TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("masks.test.ts"),
+        r#"test("masks the real assertion failure", () => {
+    try {
+        expect(actual).toBe(expected)
+    } catch (e) {
+        expect(e).toBeDefined()
+    }
+})"#,
+    )
+    .unwrap();
+
+    let output = litmus(dir.path());
+    assert_eq!(output.status.code(), Some(2));
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("catch-masks-assertion"), "stdout: {stdout}");
+}
+
 // T-304: all assertions in if → conditional-assertion
 #[test]
 fn detects_conditional_assertion() {
