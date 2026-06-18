@@ -3,10 +3,10 @@ pub mod rules;
 
 use parse::parse_test_file;
 use rules::{
-    Issue, check_catch_only_assertion, check_catch_swallow, check_conditional_assertion,
-    check_dummy_data, check_empty_test, check_missing_act, check_mock_only, check_mock_overuse,
-    check_skipped_test, check_snapshot_external, check_tautological, check_test_name,
-    check_weak_assertions,
+    Issue, check_catch_masks_assertion, check_catch_only_assertion, check_catch_swallow,
+    check_conditional_assertion, check_dummy_data, check_empty_test, check_missing_act,
+    check_mock_only, check_mock_overuse, check_skipped_test, check_snapshot_external,
+    check_tautological, check_test_name, check_weak_assertions,
 };
 use std::fmt;
 use std::fs;
@@ -149,6 +149,7 @@ pub fn analyze_files(files: &[PathBuf]) -> AnalysisResult {
         issues.extend(check_empty_test(&blocks, file));
         issues.extend(check_skipped_test(&blocks, file));
         issues.extend(check_catch_swallow(&blocks, file));
+        issues.extend(check_catch_masks_assertion(&blocks, file));
         issues.extend(check_conditional_assertion(&blocks, file));
         issues.extend(check_catch_only_assertion(&blocks, file));
         issues.extend(check_weak_assertions(&blocks, file));
