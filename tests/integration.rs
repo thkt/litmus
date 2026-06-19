@@ -799,3 +799,235 @@ fn broken_pipe_does_not_panic() {
         "broken pipe must stop cleanly, not exit 70"
     );
 }
+
+// T-058: a worker that aborts (SIGABRT, uncatchable by catch_unwind) must not
+// kill the whole batch. The parent runs each file in its own subprocess, so the
+// crashed file is reported and the sibling valid file is still analyzed. The
+// crash is loud: it raises the exit code to 70 (EX_SOFTWARE), which dominates
+// the valid sibling's blocking 2, so an analyzer crash is never a silent pass.
+// LITMUS_FORCE_ABORT is debug-gated in analyze_files, so this test is likewise
+// gated. The sibling-naming assertion makes the isolation proof non-vacuous:
+// the valid file must still be analyzed despite the crash next to it.
+#[cfg(debug_assertions)]
+#[test]
+fn worker_abort_isolated_sibling_analyzed() {
+    let dir = TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("crash.test.ts"),
+        r#"test("triggers the forced abort hook", () => { expect(result).toBe(1) })"#,
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("valid.test.ts"),
+        r#"test("weak only", () => { expect(x).toBeTruthy() })"#,
+    )
+    .unwrap();
+
+    let output = litmus_cmd()
+        .arg(dir.path())
+        .env("LITMUS_FORCE_ABORT", "crash.test.ts")
+        .output()
+        .expect("failed to run litmus");
+
+    assert_eq!(
+        output.status.code(),
+        Some(70),
+        "a worker SIGABRT must surface loudly as exit 70, dominating the sibling's 2"
+    );
+
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("crash.test.ts"),
+        "crashed file must be named on stderr: {stderr}"
+    );
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("valid.test.ts"),
+        "sibling valid file must still be analyzed: {stdout}"
+    );
+}
+
+// T-058J: the json variant of the isolation contract. The crashed worker is
+// merged into the errors array as a crash-class error (kind "crash", distinct
+// from "parse"), exit 70 is raised, and stderr stays empty so the json document
+// remains the sole output stream.
+#[cfg(debug_assertions)]
+#[test]
+fn worker_abort_isolated_json() {
+    let dir = TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("crash.test.ts"),
+        r#"test("triggers the forced abort hook", () => { expect(result).toBe(1) })"#,
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("valid.test.ts"),
+        r#"test("weak only", () => { expect(x).toBeTruthy() })"#,
+    )
+    .unwrap();
+
+    let output = litmus_cmd()
+        .arg("--json")
+        .arg(dir.path())
+        .env("LITMUS_FORCE_ABORT", "crash.test.ts")
+        .output()
+        .expect("failed to run litmus");
+
+    assert_eq!(
+        output.status.code(),
+        Some(70),
+        "a worker crash must surface loudly as exit 70"
+    );
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("crash.test.ts"),
+        "crashed file must appear in the merged errors: {stdout}"
+    );
+    assert!(
+        stdout.contains(r#""kind":"crash""#),
+        "crash must be recorded as a crash-class error, distinct from parse: {stdout}"
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "json mode keeps stderr empty: {:?}",
+        output.stderr
+    );
+}
+
+// T-059: a worker that fails to LAUNCH (not one that crashes after launch) must
+// be isolated the same way. LITMUS_FORCE_SPAWN_FAIL forces the parent's spawn
+// call to return Err for the matching file, simulating EAGAIN/ENOMEM near a
+// process limit. The parent must synthesize a crash-class error, exit 70, and
+// still analyze the sibling — proving a single launch failure does not abort the
+// whole batch (the pre-fix `?` propagation discarded all collected results).
+#[cfg(debug_assertions)]
+#[test]
+fn worker_spawn_failure_isolated_sibling_analyzed() {
+    let dir = TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("nolaunch.test.ts"),
+        r#"test("never launches its worker", () => { expect(result).toBe(1) })"#,
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("valid.test.ts"),
+        r#"test("weak only", () => { expect(x).toBeTruthy() })"#,
+    )
+    .unwrap();
+
+    let output = litmus_cmd()
+        .arg(dir.path())
+        .env("LITMUS_FORCE_SPAWN_FAIL", "nolaunch.test.ts")
+        .output()
+        .expect("failed to run litmus");
+
+    assert_eq!(
+        output.status.code(),
+        Some(70),
+        "a spawn failure must surface loudly as exit 70, not abort or be silent"
+    );
+
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("nolaunch.test.ts"),
+        "file whose worker failed to launch must be named on stderr: {stderr}"
+    );
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("valid.test.ts"),
+        "sibling must still be analyzed despite the spawn failure: {stdout}"
+    );
+}
+
+// T-059J: the json variant of the spawn-failure isolation contract. The failed
+// launch becomes a crash-class error fragment in the merged document, exit 70 is
+// raised, and stderr stays empty.
+#[cfg(debug_assertions)]
+#[test]
+fn worker_spawn_failure_isolated_json() {
+    let dir = TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("nolaunch.test.ts"),
+        r#"test("never launches its worker", () => { expect(result).toBe(1) })"#,
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("valid.test.ts"),
+        r#"test("weak only", () => { expect(x).toBeTruthy() })"#,
+    )
+    .unwrap();
+
+    let output = litmus_cmd()
+        .arg("--json")
+        .arg(dir.path())
+        .env("LITMUS_FORCE_SPAWN_FAIL", "nolaunch.test.ts")
+        .output()
+        .expect("failed to run litmus");
+
+    assert_eq!(
+        output.status.code(),
+        Some(70),
+        "a spawn failure must surface loudly as exit 70"
+    );
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("nolaunch.test.ts"),
+        "failed-launch file must appear in the merged errors: {stdout}"
+    );
+    assert!(
+        stdout.contains(r#""kind":"crash""#),
+        "spawn failure must be recorded as a crash-class error: {stdout}"
+    );
+    assert!(
+        stdout.contains("valid.test.ts"),
+        "sibling must still be merged despite the spawn failure: {stdout}"
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "json mode keeps stderr empty: {:?}",
+        output.stderr
+    );
+}
+
+// T-J14: issues from multiple files merge into one json document. With per-file
+// workers, this exercises the cross-child fragment merge directly: dropping or
+// double-wrapping any worker's fragment would fail this.
+#[test]
+fn json_merges_issues_from_multiple_files() {
+    let dir = TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("a.test.ts"),
+        r#"test("weak only", () => { expect(x).toBeTruthy() })"#,
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("b.test.ts"),
+        r#"test("also weak only here", () => { expect(y).toBeTruthy() })"#,
+    )
+    .unwrap();
+
+    let output = litmus_cmd()
+        .arg("--json")
+        .arg(dir.path())
+        .output()
+        .expect("failed to run litmus");
+
+    assert_eq!(output.status.code(), Some(2));
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.starts_with(r#"{"issues":["#),
+        "must be a single json document: {stdout}"
+    );
+    assert!(stdout.contains("a.test.ts"), "missing file a: {stdout}");
+    assert!(stdout.contains("b.test.ts"), "missing file b: {stdout}");
+    assert!(
+        output.stderr.is_empty(),
+        "json mode keeps stderr empty: {:?}",
+        output.stderr
+    );
+}

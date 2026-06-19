@@ -51,6 +51,7 @@ fn render_file_error(error: &FileError) -> String {
     let kind = match error.kind {
         FileErrorKind::Read => "read",
         FileErrorKind::Parse => "parse",
+        FileErrorKind::Crash => "crash",
     };
     format!(
         "{{\"file\":\"{}\",\"kind\":\"{}\",\"message\":\"{}\"}}",
@@ -60,8 +61,12 @@ fn render_file_error(error: &FileError) -> String {
     )
 }
 
-/// Render the full analysis result as a single JSON document for stdout.
-pub fn render_result(result: &AnalysisResult) -> String {
+/// Render the issues and errors arrays as their inner comma-joined fragments,
+/// without the enclosing `{"issues":[...],"errors":[...]}` wrapper. The parent
+/// process merges per-file worker fragments into one document; both fragments
+/// are newline-free because `escape` strips every control char (incl. \n, \r),
+/// which lets the worker frame them as `issues_frag\nerrors_frag`.
+pub fn render_fragments(result: &AnalysisResult) -> (String, String) {
     let issues = result
         .issues
         .iter()
@@ -74,6 +79,12 @@ pub fn render_result(result: &AnalysisResult) -> String {
         .map(render_file_error)
         .collect::<Vec<_>>()
         .join(",");
+    (issues, errors)
+}
+
+/// Render the full analysis result as a single JSON document for stdout.
+pub fn render_result(result: &AnalysisResult) -> String {
+    let (issues, errors) = render_fragments(result);
     format!("{{\"issues\":[{issues}],\"errors\":[{errors}]}}")
 }
 
@@ -166,6 +177,25 @@ mod tests {
         assert_eq!(
             render_result(&result),
             r#"{"issues":[],"errors":[{"file":"b.test.ts","kind":"parse","message":"unexpected token"}]}"#
+        );
+    }
+
+    // T-J15: a worker crash carries the "crash" kind discriminant, distinct from
+    // "parse", so a consumer can tell "litmus could not analyze" from "the file
+    // is malformed".
+    #[test]
+    fn render_result_with_crash_error() {
+        let result = AnalysisResult {
+            issues: Vec::new(),
+            errors: vec![FileError {
+                file: PathBuf::from("c.test.ts"),
+                kind: FileErrorKind::Crash,
+                message: "analysis aborted: worker terminated by signal".to_owned(),
+            }],
+        };
+        assert_eq!(
+            render_result(&result),
+            r#"{"issues":[],"errors":[{"file":"c.test.ts","kind":"crash","message":"analysis aborted: worker terminated by signal"}]}"#
         );
     }
 

@@ -9,9 +9,13 @@ use rules::{
     check_mock_only, check_mock_overuse, check_skipped_test, check_snapshot_external,
     check_tautological, check_test_name, check_weak_assertions,
 };
+#[cfg(debug_assertions)]
+use std::env;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
+#[cfg(debug_assertions)]
+use std::process;
 
 const EXCLUDED_DIRS: &[&str] = &["node_modules", ".git", "dist", "build", "target"];
 
@@ -72,6 +76,12 @@ pub struct FileError {
 pub enum FileErrorKind {
     Read,
     Parse,
+    // The per-file worker subprocess failed to complete (SIGABRT from a parser
+    // stack overflow, OOM kill, an internal error exit, or a spawn failure). It
+    // is distinct from Parse: the file may be valid TypeScript that litmus could
+    // not analyze, not malformed input, so a consumer must not read it as a
+    // syntax verdict on the source.
+    Crash,
 }
 
 impl fmt::Display for FileError {
@@ -79,6 +89,7 @@ impl fmt::Display for FileError {
         let kind = match self.kind {
             FileErrorKind::Read => "read error",
             FileErrorKind::Parse => "parse error",
+            FileErrorKind::Crash => "analysis error",
         };
         write!(
             f,
@@ -123,6 +134,17 @@ pub fn analyze_files(files: &[PathBuf]) -> AnalysisResult {
     let mut errors = Vec::new();
 
     for file in files {
+        // Deterministic crash hook for the subprocess-isolation test: when a
+        // file path matches LITMUS_FORCE_ABORT, abort the process so the test
+        // can prove the parent isolates a worker SIGABRT (mirrors main's
+        // LITMUS_FORCE_PANIC). Debug-only so release builds carry no env check.
+        #[cfg(debug_assertions)]
+        if let Some(target) = env::var_os("LITMUS_FORCE_ABORT")
+            && file.to_string_lossy().contains(&*target.to_string_lossy())
+        {
+            process::abort();
+        }
+
         let source = match fs::read_to_string(file) {
             Ok(s) => s,
             Err(e) => {
