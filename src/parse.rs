@@ -174,19 +174,20 @@ pub fn parse_test_file(source: &str, path: &Path) -> Result<Vec<TestBlock>, Stri
     }
 
     let mut blocks = Vec::new();
-    walk_statements(&ret.program.body, source, &mut blocks);
+    let src = Source::new(source);
+    walk_statements(&ret.program.body, &src, &mut blocks);
     Ok(blocks)
 }
 
-fn walk_statements(stmts: &[Statement<'_>], source: &str, blocks: &mut Vec<TestBlock>) {
+fn walk_statements(stmts: &[Statement<'_>], src: &Source, blocks: &mut Vec<TestBlock>) {
     for stmt in stmts {
         if let Statement::ExpressionStatement(expr_stmt) = stmt {
-            check_test_call(&expr_stmt.expression, source, blocks);
+            check_test_call(&expr_stmt.expression, src, blocks);
         }
     }
 }
 
-fn check_test_call(expr: &Expression<'_>, source: &str, blocks: &mut Vec<TestBlock>) {
+fn check_test_call(expr: &Expression<'_>, src: &Source, blocks: &mut Vec<TestBlock>) {
     let Expression::CallExpression(call) = expr else {
         return;
     };
@@ -198,13 +199,13 @@ fn check_test_call(expr: &Expression<'_>, source: &str, blocks: &mut Vec<TestBlo
 
     match name {
         "test" | "it" => {
-            if let Some(mut block) = extract_test_block(call, source) {
+            if let Some(mut block) = extract_test_block(call, src) {
                 block.modifier = modifier;
                 blocks.push(block);
             } else if modifier == Some(TestModifier::Todo) {
                 // test.todo("x") has no callback — create minimal block
                 if let Some(name) = first_string_arg(&call.arguments) {
-                    let line = offset_to_line(source, call.span.start);
+                    let line = src.line(call.span.start);
                     blocks.push(TestBlock {
                         name,
                         line,
@@ -223,7 +224,7 @@ fn check_test_call(expr: &Expression<'_>, source: &str, blocks: &mut Vec<TestBlo
         }
         "describe" => {
             if let Some(body) = callback_body(&call.arguments) {
-                walk_statements(&body.statements, source, blocks);
+                walk_statements(&body.statements, src, blocks);
             }
         }
         _ => {}
@@ -249,10 +250,10 @@ fn callee_name<'a>(expr: &'a Expression<'a>) -> Option<(&'a str, Option<TestModi
     }
 }
 
-fn extract_test_block(call: &CallExpression<'_>, source: &str) -> Option<TestBlock> {
+fn extract_test_block(call: &CallExpression<'_>, src: &Source) -> Option<TestBlock> {
     let name = first_string_arg(&call.arguments)?;
     let body = callback_body(&call.arguments)?;
-    let line = offset_to_line(source, call.span.start);
+    let line = src.line(call.span.start);
     let has_empty_body = body.statements.is_empty();
     let has_act = body_has_act(&body.statements);
     let bound_names = body_bound_names(&body.statements);
@@ -264,7 +265,7 @@ fn extract_test_block(call: &CallExpression<'_>, source: &str) -> Option<TestBlo
     let mut dummy_literals = Vec::new();
     scan_body(
         &body.statements,
-        source,
+        src,
         &mut assertions,
         &mut mock_calls,
         &mut catch_swallows,
@@ -309,7 +310,7 @@ fn callback_body<'a>(args: &'a [Argument<'a>]) -> Option<&'a FunctionBody<'a>> {
 #[allow(clippy::too_many_arguments)]
 fn scan_body(
     stmts: &[Statement<'_>],
-    source: &str,
+    src: &Source,
     assertions: &mut Vec<Assertion>,
     mocks: &mut Vec<MockCall>,
     catch_swallows: &mut Vec<u32>,
@@ -320,7 +321,7 @@ fn scan_body(
     for stmt in stmts {
         scan_statement(
             stmt,
-            source,
+            src,
             assertions,
             mocks,
             catch_swallows,
@@ -334,7 +335,7 @@ fn scan_body(
 #[allow(clippy::too_many_arguments)]
 fn scan_statement(
     stmt: &Statement<'_>,
-    source: &str,
+    src: &Source,
     assertions: &mut Vec<Assertion>,
     mocks: &mut Vec<MockCall>,
     catch_swallows: &mut Vec<u32>,
@@ -344,27 +345,27 @@ fn scan_statement(
 ) {
     match stmt {
         Statement::ExpressionStatement(es) => {
-            scan_expr(&es.expression, source, assertions, mocks, context);
-            collect_dummies_expr(&es.expression, source, dummies);
+            scan_expr(&es.expression, src, assertions, mocks, context);
+            collect_dummies_expr(&es.expression, src, dummies);
         }
         Statement::VariableDeclaration(vd) => {
             for decl in &vd.declarations {
                 if let Some(init) = &decl.init {
-                    scan_expr(init, source, assertions, mocks, context);
-                    collect_dummies_expr(init, source, dummies);
+                    scan_expr(init, src, assertions, mocks, context);
+                    collect_dummies_expr(init, src, dummies);
                 }
             }
         }
         Statement::ReturnStatement(rs) => {
             if let Some(arg) = &rs.argument {
-                scan_expr(arg, source, assertions, mocks, context);
-                collect_dummies_expr(arg, source, dummies);
+                scan_expr(arg, src, assertions, mocks, context);
+                collect_dummies_expr(arg, src, dummies);
             }
         }
         Statement::BlockStatement(bs) => {
             scan_body(
                 &bs.body,
-                source,
+                src,
                 assertions,
                 mocks,
                 catch_swallows,
@@ -376,7 +377,7 @@ fn scan_statement(
         Statement::IfStatement(if_stmt) => {
             scan_statement(
                 &if_stmt.consequent,
-                source,
+                src,
                 assertions,
                 mocks,
                 catch_swallows,
@@ -387,7 +388,7 @@ fn scan_statement(
             if let Some(alt) = &if_stmt.alternate {
                 scan_statement(
                     alt,
-                    source,
+                    src,
                     assertions,
                     mocks,
                     catch_swallows,
@@ -400,7 +401,7 @@ fn scan_statement(
         Statement::ForStatement(for_stmt) => {
             scan_statement(
                 &for_stmt.body,
-                source,
+                src,
                 assertions,
                 mocks,
                 catch_swallows,
@@ -412,7 +413,7 @@ fn scan_statement(
         Statement::ForInStatement(for_in) => {
             scan_statement(
                 &for_in.body,
-                source,
+                src,
                 assertions,
                 mocks,
                 catch_swallows,
@@ -424,7 +425,7 @@ fn scan_statement(
         Statement::ForOfStatement(for_of) => {
             scan_statement(
                 &for_of.body,
-                source,
+                src,
                 assertions,
                 mocks,
                 catch_swallows,
@@ -436,7 +437,7 @@ fn scan_statement(
         Statement::WhileStatement(while_stmt) => {
             scan_statement(
                 &while_stmt.body,
-                source,
+                src,
                 assertions,
                 mocks,
                 catch_swallows,
@@ -448,7 +449,7 @@ fn scan_statement(
         Statement::DoWhileStatement(do_while) => {
             scan_statement(
                 &do_while.body,
-                source,
+                src,
                 assertions,
                 mocks,
                 catch_swallows,
@@ -460,7 +461,7 @@ fn scan_statement(
         Statement::TryStatement(try_stmt) => {
             scan_try_statement(
                 try_stmt,
-                source,
+                src,
                 assertions,
                 mocks,
                 catch_swallows,
@@ -473,7 +474,7 @@ fn scan_statement(
             for case in &switch_stmt.cases {
                 scan_body(
                     &case.consequent,
-                    source,
+                    src,
                     assertions,
                     mocks,
                     catch_swallows,
@@ -491,7 +492,7 @@ fn scan_statement(
 // block. Used by catch-masks to decide whether the try contributes an
 // AssertionError the catch could swallow. Nested control flow is intentionally
 // excluded for consistency with the top-level catch rethrow check.
-fn try_block_has_top_level_assertion(body: &[Statement<'_>], source: &str) -> bool {
+fn try_block_has_top_level_assertion(body: &[Statement<'_>], src: &Source) -> bool {
     body.iter().any(|stmt| {
         let Statement::ExpressionStatement(es) = stmt else {
             return false;
@@ -500,7 +501,7 @@ fn try_block_has_top_level_assertion(body: &[Statement<'_>], source: &str) -> bo
         let mut throwaway_mocks = Vec::new();
         scan_expr(
             &es.expression,
-            source,
+            src,
             &mut probe,
             &mut throwaway_mocks,
             &AssertionContext::TryBlock,
@@ -512,7 +513,7 @@ fn try_block_has_top_level_assertion(body: &[Statement<'_>], source: &str) -> bo
 #[allow(clippy::too_many_arguments)]
 fn scan_try_statement(
     try_stmt: &TryStatement<'_>,
-    source: &str,
+    src: &Source,
     assertions: &mut Vec<Assertion>,
     mocks: &mut Vec<MockCall>,
     catch_swallows: &mut Vec<u32>,
@@ -525,10 +526,10 @@ fn scan_try_statement(
     // shielded by that inner catch and never reaches this catch, so a delta over
     // the body-wide flattened vec (which scan_body bubbles inner assertions into)
     // would misfire on the outer catch.
-    let try_has_assertion = try_block_has_top_level_assertion(&try_stmt.block.body, source);
+    let try_has_assertion = try_block_has_top_level_assertion(&try_stmt.block.body, src);
     scan_body(
         &try_stmt.block.body,
-        source,
+        src,
         assertions,
         mocks,
         catch_swallows,
@@ -539,13 +540,13 @@ fn scan_try_statement(
 
     if let Some(handler) = &try_stmt.handler {
         if handler.body.body.is_empty() {
-            catch_swallows.push(offset_to_line(source, handler.span.start));
+            catch_swallows.push(src.line(handler.span.start));
         } else {
             let mut catch_assertions = Vec::new();
             for catch_stmt in &handler.body.body {
                 scan_statement(
                     catch_stmt,
-                    source,
+                    src,
                     &mut catch_assertions,
                     mocks,
                     catch_swallows,
@@ -559,13 +560,13 @@ fn scan_try_statement(
             // the catch neither swallows nor masks it (#27).
             let catch_rethrows = body_contains_throw(&handler.body.body);
             if catch_assertions.is_empty() && !catch_rethrows {
-                catch_swallows.push(offset_to_line(source, handler.span.start));
+                catch_swallows.push(src.line(handler.span.start));
             }
             // catch-masks: try asserts, catch asserts, catch does not rethrow.
             // The try AssertionError is swallowed and replaced by a passing
             // catch assertion (js-testing-best-practices §1.10).
             if try_has_assertion && !catch_assertions.is_empty() && !catch_rethrows {
-                catch_masks.push(offset_to_line(source, handler.span.start));
+                catch_masks.push(src.line(handler.span.start));
             }
             assertions.extend(catch_assertions);
         }
@@ -574,7 +575,7 @@ fn scan_try_statement(
     if let Some(finalizer) = &try_stmt.finalizer {
         scan_body(
             &finalizer.body,
-            source,
+            src,
             assertions,
             mocks,
             catch_swallows,
@@ -624,74 +625,74 @@ fn stmt_contains_throw(stmt: &Statement<'_>) -> bool {
     }
 }
 
-fn collect_dummies_expr(expr: &Expression<'_>, source: &str, out: &mut Vec<DummyLiteral>) {
+fn collect_dummies_expr(expr: &Expression<'_>, src: &Source, out: &mut Vec<DummyLiteral>) {
     match expr {
-        Expression::StringLiteral(s) => push_if_dummy(s, source, out),
-        Expression::CallExpression(call) => collect_dummies_call(call, source, out),
-        Expression::ObjectExpression(obj) => collect_dummies_object(obj, source, out),
-        Expression::ArrayExpression(arr) => collect_dummies_array(arr, source, out),
-        Expression::StaticMemberExpression(m) => collect_dummies_expr(&m.object, source, out),
-        Expression::ComputedMemberExpression(m) => collect_dummies_expr(&m.object, source, out),
-        Expression::AwaitExpression(a) => collect_dummies_expr(&a.argument, source, out),
-        Expression::ParenthesizedExpression(p) => collect_dummies_expr(&p.expression, source, out),
+        Expression::StringLiteral(s) => push_if_dummy(s, src, out),
+        Expression::CallExpression(call) => collect_dummies_call(call, src, out),
+        Expression::ObjectExpression(obj) => collect_dummies_object(obj, src, out),
+        Expression::ArrayExpression(arr) => collect_dummies_array(arr, src, out),
+        Expression::StaticMemberExpression(m) => collect_dummies_expr(&m.object, src, out),
+        Expression::ComputedMemberExpression(m) => collect_dummies_expr(&m.object, src, out),
+        Expression::AwaitExpression(a) => collect_dummies_expr(&a.argument, src, out),
+        Expression::ParenthesizedExpression(p) => collect_dummies_expr(&p.expression, src, out),
         _ => {}
     }
 }
 
 // Recurse into object property VALUES only. A key like `{ foo: 1 }` names a
 // field, not a test input, so flagging it would be a false positive.
-fn collect_dummies_object(obj: &ObjectExpression<'_>, source: &str, out: &mut Vec<DummyLiteral>) {
+fn collect_dummies_object(obj: &ObjectExpression<'_>, src: &Source, out: &mut Vec<DummyLiteral>) {
     for prop in &obj.properties {
         match prop {
-            ObjectPropertyKind::ObjectProperty(p) => collect_dummies_expr(&p.value, source, out),
+            ObjectPropertyKind::ObjectProperty(p) => collect_dummies_expr(&p.value, src, out),
             ObjectPropertyKind::SpreadProperty(s) => {
-                collect_dummies_expr(&s.argument, source, out);
+                collect_dummies_expr(&s.argument, src, out);
             }
         }
     }
 }
 
-fn collect_dummies_array(arr: &ArrayExpression<'_>, source: &str, out: &mut Vec<DummyLiteral>) {
+fn collect_dummies_array(arr: &ArrayExpression<'_>, src: &Source, out: &mut Vec<DummyLiteral>) {
     for element in &arr.elements {
         match element {
-            ArrayExpressionElement::StringLiteral(s) => push_if_dummy(s, source, out),
-            ArrayExpressionElement::CallExpression(c) => collect_dummies_call(c, source, out),
-            ArrayExpressionElement::ObjectExpression(o) => collect_dummies_object(o, source, out),
-            ArrayExpressionElement::ArrayExpression(a) => collect_dummies_array(a, source, out),
+            ArrayExpressionElement::StringLiteral(s) => push_if_dummy(s, src, out),
+            ArrayExpressionElement::CallExpression(c) => collect_dummies_call(c, src, out),
+            ArrayExpressionElement::ObjectExpression(o) => collect_dummies_object(o, src, out),
+            ArrayExpressionElement::ArrayExpression(a) => collect_dummies_array(a, src, out),
             ArrayExpressionElement::SpreadElement(se) => {
-                collect_dummies_expr(&se.argument, source, out);
+                collect_dummies_expr(&se.argument, src, out);
             }
             _ => {}
         }
     }
 }
 
-fn collect_dummies_call(call: &CallExpression<'_>, source: &str, out: &mut Vec<DummyLiteral>) {
+fn collect_dummies_call(call: &CallExpression<'_>, src: &Source, out: &mut Vec<DummyLiteral>) {
     // expect(<literal>) is already reported by the tautological rule, so suppress
     // its direct string argument here, including a parenthesized one like
     // expect(("foo")). Nested calls are still recursed into, so
     // expect(slugify("foo")) flags "foo".
     let suppress = matches!(callee_name(&call.callee), Some(("expect", _)));
-    collect_dummies_expr(&call.callee, source, out);
+    collect_dummies_expr(&call.callee, src, out);
     for arg in &call.arguments {
         match arg {
             Argument::StringLiteral(s) => {
                 if !suppress {
-                    push_if_dummy(s, source, out);
+                    push_if_dummy(s, src, out);
                 }
             }
-            Argument::CallExpression(c) => collect_dummies_call(c, source, out),
-            Argument::ObjectExpression(o) => collect_dummies_object(o, source, out),
-            Argument::ArrayExpression(a) => collect_dummies_array(a, source, out),
-            Argument::StaticMemberExpression(m) => collect_dummies_expr(&m.object, source, out),
-            Argument::ComputedMemberExpression(m) => collect_dummies_expr(&m.object, source, out),
-            Argument::AwaitExpression(a) => collect_dummies_expr(&a.argument, source, out),
+            Argument::CallExpression(c) => collect_dummies_call(c, src, out),
+            Argument::ObjectExpression(o) => collect_dummies_object(o, src, out),
+            Argument::ArrayExpression(a) => collect_dummies_array(a, src, out),
+            Argument::StaticMemberExpression(m) => collect_dummies_expr(&m.object, src, out),
+            Argument::ComputedMemberExpression(m) => collect_dummies_expr(&m.object, src, out),
+            Argument::AwaitExpression(a) => collect_dummies_expr(&a.argument, src, out),
             Argument::ParenthesizedExpression(p) => {
                 if !(suppress && is_direct_string(&p.expression)) {
-                    collect_dummies_expr(&p.expression, source, out);
+                    collect_dummies_expr(&p.expression, src, out);
                 }
             }
-            Argument::SpreadElement(se) => collect_dummies_expr(&se.argument, source, out),
+            Argument::SpreadElement(se) => collect_dummies_expr(&se.argument, src, out),
             _ => {}
         }
     }
@@ -705,18 +706,18 @@ fn is_direct_string(expr: &Expression<'_>) -> bool {
     matches!(expr, Expression::StringLiteral(_))
 }
 
-fn push_if_dummy(s: &StringLiteral<'_>, source: &str, out: &mut Vec<DummyLiteral>) {
+fn push_if_dummy(s: &StringLiteral<'_>, src: &Source, out: &mut Vec<DummyLiteral>) {
     if DUMMY_STRINGS.contains(&s.value.as_str()) {
         out.push(DummyLiteral {
             value: s.value.to_string(),
-            line: offset_to_line(source, s.span.start),
+            line: src.line(s.span.start),
         });
     }
 }
 
 fn scan_expr(
     expr: &Expression<'_>,
-    source: &str,
+    src: &Source,
     assertions: &mut Vec<Assertion>,
     mocks: &mut Vec<MockCall>,
     context: &AssertionContext,
@@ -732,9 +733,9 @@ fn scan_expr(
     while let Some((expr, context)) = stack.pop() {
         match expr {
             Expression::CallExpression(call) => {
-                if let Some(a) = try_assertion(call, source, &context) {
+                if let Some(a) = try_assertion(call, src, &context) {
                     assertions.push(a);
-                } else if let Some(m) = try_mock(call, source) {
+                } else if let Some(m) = try_mock(call, src) {
                     mocks.push(m);
                 } else {
                     // Chained calls like vi.fn().mockReturnValue()
@@ -771,17 +772,17 @@ fn scan_expr(
 
 fn try_assertion(
     call: &CallExpression<'_>,
-    source: &str,
+    src: &Source,
     context: &AssertionContext,
 ) -> Option<Assertion> {
     let Expression::StaticMemberExpression(member) = &call.callee else {
         return None;
     };
 
-    let (target, target_kind, target_root) = find_expect_target(&member.object, source)?;
+    let (target, target_kind, target_root) = find_expect_target(&member.object, src)?;
     let matcher = member.property.name.to_string();
     let is_weak = WEAK_MATCHERS.contains(&matcher.as_str());
-    let line = offset_to_line(source, call.span.start);
+    let line = src.line(call.span.start);
 
     Some(Assertion {
         line,
@@ -796,7 +797,7 @@ fn try_assertion(
 
 fn find_expect_target(
     expr: &Expression<'_>,
-    source: &str,
+    src: &Source,
 ) -> Option<(String, TargetKind, Option<String>)> {
     match expr {
         Expression::CallExpression(call) => {
@@ -805,7 +806,7 @@ fn find_expect_target(
                     .arguments
                     .first()
                     .map(|arg| {
-                        let text = arg.span().source_text(source).to_owned();
+                        let text = arg.span().source_text(src.text).to_owned();
                         let kind = classify_argument(arg);
                         let root = arg.as_expression().and_then(expr_root_ident);
                         (text, kind, root)
@@ -816,7 +817,7 @@ fn find_expect_target(
                 None
             }
         }
-        Expression::StaticMemberExpression(member) => find_expect_target(&member.object, source),
+        Expression::StaticMemberExpression(member) => find_expect_target(&member.object, src),
         _ => None,
     }
 }
@@ -864,9 +865,9 @@ fn classify_expression(expr: &Expression<'_>) -> TargetKind {
     }
 }
 
-fn try_mock(call: &CallExpression<'_>, source: &str) -> Option<MockCall> {
+fn try_mock(call: &CallExpression<'_>, src: &Source) -> Option<MockCall> {
     let kind = mock_kind(call)?;
-    let line = offset_to_line(source, call.span.start);
+    let line = src.line(call.span.start);
     Some(MockCall { line, kind })
 }
 
@@ -1124,10 +1125,37 @@ fn object_has_act(obj: &ObjectExpression<'_>) -> bool {
     })
 }
 
-fn offset_to_line(source: &str, offset: u32) -> u32 {
-    let end = (offset as usize).min(source.len());
-    let count = source[..end].bytes().filter(|&b| b == b'\n').count();
-    u32::try_from(count).unwrap_or(u32::MAX).saturating_add(1)
+/// The source text plus a precomputed ascending list of every `'\n'` byte
+/// offset, built once per file. Line lookups are then O(log n) instead of
+/// re-scanning from the start each call (the old per-call `offset_to_line`
+/// made the whole walk O(n²); #28). Threaded through the walk so both the
+/// raw text (span extraction) and line numbers share one allocation.
+struct Source<'a> {
+    text: &'a str,
+    newline_offsets: Vec<u32>,
+}
+
+impl<'a> Source<'a> {
+    fn new(text: &'a str) -> Self {
+        let newline_offsets = text
+            .bytes()
+            .enumerate()
+            .filter(|&(_, b)| b == b'\n')
+            .map(|(i, _)| u32::try_from(i).unwrap_or(u32::MAX))
+            .collect();
+        Self {
+            text,
+            newline_offsets,
+        }
+    }
+
+    /// 1-based line of `offset`. Counts newlines strictly before `offset`,
+    /// matching the old `source[..offset.min(len)]` scan: a `'\n'` exactly at
+    /// `offset` is not counted.
+    fn line(&self, offset: u32) -> u32 {
+        let count = self.newline_offsets.partition_point(|&p| p < offset);
+        u32::try_from(count).unwrap_or(u32::MAX).saturating_add(1)
+    }
 }
 
 #[cfg(test)]
@@ -1137,6 +1165,63 @@ mod tests {
 
     fn parse(source: &str) -> Vec<TestBlock> {
         parse_test_file(source, Path::new("test.tsx")).unwrap()
+    }
+
+    // The original O(n) line lookup, kept verbatim so the characterization test
+    // below can assert `Source::line` stays byte-identical to it (#28).
+    fn naive_offset_to_line(source: &str, offset: u32) -> u32 {
+        let end = (offset as usize).min(source.len());
+        let count = source[..end].bytes().filter(|&b| b == b'\n').count();
+        u32::try_from(count).unwrap_or(u32::MAX).saturating_add(1)
+    }
+
+    // T-001..T-006: Source::line pins the documented boundary behaviour.
+    #[test]
+    fn source_line_handles_boundaries() {
+        // empty file → line 1 at offset 0
+        assert_eq!(Source::new("").line(0), 1);
+        let s = "a\nb\nc";
+        assert_eq!(Source::new(s).line(0), 1); // first char
+        assert_eq!(Source::new(s).line(2), 2); // 'b', after first '\n'
+        assert_eq!(Source::new(s).line(1), 1); // exactly on '\n' is not counted
+        // offset past len clamps to counting every newline
+        assert_eq!(Source::new("a\nb").line(100), 2);
+        // no trailing newline: last char is still on the last line
+        assert_eq!(Source::new("x\ny").line(2), 2);
+    }
+
+    // T-007: over every byte offset across newline-edge cases, Source::line
+    // must equal the original scan exactly — proves the perf refactor changed
+    // no line numbers (#28).
+    #[test]
+    fn source_line_matches_naive_over_all_offsets() {
+        let cases = [
+            "",
+            "\n",
+            "no newlines here",
+            "a\nb\nc\n",
+            "\n\n\n",
+            "line1\nline2\nline3",
+            "trailing\n",
+            "α\nβ\nγ", // multibyte: offsets are byte positions
+        ];
+        for source in cases {
+            let index = Source::new(source);
+            let len = u32::try_from(source.len()).unwrap();
+            for offset in 0..=len + 2 {
+                // Real spans land on char boundaries; the naive scan slices
+                // `source[..offset]` and would panic mid-codepoint, so only the
+                // boundary offsets are in its domain.
+                if (offset as usize) <= source.len() && !source.is_char_boundary(offset as usize) {
+                    continue;
+                }
+                assert_eq!(
+                    index.line(offset),
+                    naive_offset_to_line(source, offset),
+                    "offset {offset} in {source:?}"
+                );
+            }
+        }
     }
 
     // T-025a: byte-scan reports the deepest bracket nesting, mixing kinds and
