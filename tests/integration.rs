@@ -114,6 +114,49 @@ fn parse_error_skipped_others_processed() {
     );
 }
 
+// T-025 (issue #25): a file nested deeper than litmus parses would overflow
+// oxc's stack and abort the process with SIGABRT (exit code via signal, status
+// .code() == None). The pre-parse depth guard turns it into a per-file parse
+// error reported on stderr, so the process exits cleanly and the sibling valid
+// file is still analyzed (exit 2 from its weak assertion, never a signal abort).
+#[test]
+fn deeply_nested_file_skipped_not_aborted() {
+    let dir = TempDir::new().unwrap();
+
+    // 4000 is well past the measured release overflow floor (~2700) for
+    // expression bracket nesting, so before the guard this file aborted the
+    // process; it is also well past the guard's limit (500), so after the guard
+    // it is rejected without ever parsing.
+    let n = 4000;
+    let deep = format!("const y = {}0{};", "[".repeat(n), "]".repeat(n));
+    fs::write(dir.path().join("deep.test.ts"), deep).unwrap();
+
+    fs::write(
+        dir.path().join("valid.test.ts"),
+        r#"test("weak", () => { expect(x).toBeTruthy() })"#,
+    )
+    .unwrap();
+
+    let output = litmus(dir.path());
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "must exit cleanly from the valid file, not abort on SIGABRT"
+    );
+
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("deep.test.ts") && stderr.contains("parse error"),
+        "stderr should report the deep file as a parse error: {stderr}"
+    );
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("valid.test.ts"),
+        "sibling valid file must still be analyzed: {stdout}"
+    );
+}
+
 // RC-002: .test.tsx files detected and analyzed
 #[test]
 fn tsx_files_detected() {
