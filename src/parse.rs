@@ -554,13 +554,10 @@ fn scan_try_statement(
                     &AssertionContext::CatchBlock,
                 );
             }
-            // A top-level rethrow lets the try AssertionError propagate, so the
-            // catch neither swallows nor masks it.
-            let catch_rethrows = handler
-                .body
-                .body
-                .iter()
-                .any(|s| matches!(s, Statement::ThrowStatement(_)));
+            // A rethrow anywhere in the catch — including nested in if / for /
+            // block / switch / try — lets the try AssertionError propagate, so
+            // the catch neither swallows nor masks it (#27).
+            let catch_rethrows = body_contains_throw(&handler.body.body);
             if catch_assertions.is_empty() && !catch_rethrows {
                 catch_swallows.push(offset_to_line(source, handler.span.start));
             }
@@ -585,6 +582,45 @@ fn scan_try_statement(
             dummies,
             *context,
         );
+    }
+}
+
+// Whether any statement rethrows. Walks control-flow nesting (block / if / for
+// / while / switch / try) but stops at nested function expressions: a throw
+// inside a callback (e.g. `items.forEach(() => { throw e })`) does not rethrow
+// synchronously from the catch. Recursion depth is bounded by the pre-parse
+// BRACKET_DEPTH_LIMIT guard (#25), which caps AST nesting before any scan runs.
+fn body_contains_throw(stmts: &[Statement<'_>]) -> bool {
+    stmts.iter().any(stmt_contains_throw)
+}
+
+fn stmt_contains_throw(stmt: &Statement<'_>) -> bool {
+    match stmt {
+        Statement::ThrowStatement(_) => true,
+        Statement::BlockStatement(bs) => body_contains_throw(&bs.body),
+        Statement::IfStatement(s) => {
+            stmt_contains_throw(&s.consequent)
+                || s.alternate.as_ref().is_some_and(|a| stmt_contains_throw(a))
+        }
+        Statement::ForStatement(s) => stmt_contains_throw(&s.body),
+        Statement::ForInStatement(s) => stmt_contains_throw(&s.body),
+        Statement::ForOfStatement(s) => stmt_contains_throw(&s.body),
+        Statement::WhileStatement(s) => stmt_contains_throw(&s.body),
+        Statement::DoWhileStatement(s) => stmt_contains_throw(&s.body),
+        Statement::TryStatement(s) => {
+            body_contains_throw(&s.block.body)
+                || s.handler
+                    .as_ref()
+                    .is_some_and(|h| body_contains_throw(&h.body.body))
+                || s.finalizer
+                    .as_ref()
+                    .is_some_and(|f| body_contains_throw(&f.body))
+        }
+        Statement::SwitchStatement(s) => s
+            .cases
+            .iter()
+            .any(|c| c.consequent.iter().any(stmt_contains_throw)),
+        _ => false,
     }
 }
 
@@ -1675,6 +1711,73 @@ describe("outer", () => {
         })"#;
         let blocks = parse(source);
         assert!(blocks[0].catch_swallows.is_empty());
+    }
+
+    // T-112b: rethrow nested in an if → no catch_swallow (#27 false positive)
+    #[test]
+    fn nested_rethrow_in_catch_no_swallow() {
+        let source = r#"test("x", () => {
+            try {
+                riskyOp()
+            } catch (e) {
+                if (e) { throw e }
+            }
+        })"#;
+        let blocks = parse(source);
+        assert!(blocks[0].catch_swallows.is_empty());
+    }
+
+    // T-112c: rethrow nested in a block/for/try inside the catch → no swallow
+    #[test]
+    fn deeply_nested_rethrow_in_catch_no_swallow() {
+        let source = r#"test("x", () => {
+            try {
+                riskyOp()
+            } catch (e) {
+                for (const k of keys) { { throw e } }
+            }
+        })"#;
+        let blocks = parse(source);
+        assert!(blocks[0].catch_swallows.is_empty());
+    }
+
+    // T-112d: a throw only inside a nested callback is not a synchronous
+    // rethrow, so the catch still swallows.
+    #[test]
+    fn throw_in_catch_callback_still_swallows() {
+        let source = r#"test("x", () => {
+            try {
+                riskyOp()
+            } catch (e) {
+                items.forEach(() => { throw e })
+            }
+        })"#;
+        let blocks = parse(source);
+        assert_eq!(blocks[0].catch_swallows.len(), 1);
+    }
+
+    // T-112e: rethrow nested in each control-flow construct → no swallow (#27)
+    #[test]
+    fn nested_rethrow_in_each_construct_no_swallow() {
+        let catch_bodies = [
+            "for (let i = 0; i < 1; i++) { throw e }",
+            "for (const k in obj) { throw e }",
+            "while (e) { throw e }",
+            "do { throw e } while (e)",
+            "switch (e) { default: throw e }",
+            "try { throw e } finally {}",
+            "try { x() } catch (inner) { throw inner }",
+            "try { x() } finally { throw e }",
+        ];
+        for body in catch_bodies {
+            let source =
+                format!(r#"test("x", () => {{ try {{ risky() }} catch (e) {{ {body} }} }})"#);
+            let blocks = parse(&source);
+            assert!(
+                blocks[0].catch_swallows.is_empty(),
+                "should not swallow with catch body: {body}"
+            );
+        }
     }
 
     // T-114: empty body → has_empty_body == true

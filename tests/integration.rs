@@ -384,6 +384,23 @@ fn detects_catch_swallow() {
     assert!(stdout.contains("catch-swallow"), "stdout: {stdout}");
 }
 
+// T-303b: rethrow nested in an if is not a catch-swallow false positive (#27)
+#[test]
+fn nested_rethrow_is_not_catch_swallow() {
+    let dir = TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("rethrow.test.ts"),
+        r#"test("rethrows error when condition holds", () => {
+    try { risky() } catch (e) { if (e) { throw e } }
+})"#,
+    )
+    .unwrap();
+
+    let output = litmus(dir.path());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(!stdout.contains("catch-swallow"), "stdout: {stdout}");
+}
+
 // T-I1: try assertion swallowed by catch assertion → catch-masks-assertion, exit 2
 #[test]
 fn detects_catch_masks_assertion() {
