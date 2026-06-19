@@ -457,4 +457,15 @@ mod tests {
         assert!(config.json);
         assert_eq!(config.dir, PathBuf::from("."));
     }
+
+    // T-060: --worker-file with no following value is a usage error, not a
+    // silent default; the message names the flag that needs an argument.
+    #[test]
+    fn parse_args_worker_file_without_value_is_usage_error() {
+        let args = vec!["litmus".to_owned(), "--worker-file".to_owned()];
+        assert!(
+            matches!(parse_args(&args), Err(litmus::LitmusError::Usage(m)) if m.contains("--worker-file")),
+            "expected a usage error naming --worker-file when no value follows"
+        );
+    }
 }

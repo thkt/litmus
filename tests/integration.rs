@@ -800,6 +800,76 @@ fn broken_pipe_does_not_panic() {
     );
 }
 
+// T-J16: --json with only warning-level issues → exit 1, mirroring text mode.
+// Pins the json warning branch distinctly from the blocking (exit 2) path.
+#[test]
+fn json_mode_warning_only_exits_1() {
+    let dir = TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("noact.test.ts"),
+        r#"test("computes the discounted total", () => {
+    const total = 42
+    expect(total).toBe(42)
+})"#,
+    )
+    .unwrap();
+
+    let output = litmus_cmd()
+        .arg("--json")
+        .arg(dir.path())
+        .output()
+        .expect("failed to run litmus");
+    assert_eq!(output.status.code(), Some(1));
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains(r#""rule":"missing-act""#),
+        "stdout: {stdout}"
+    );
+    assert!(stdout.contains(r#""errors":[]"#), "stdout: {stdout}");
+    assert!(output.stderr.is_empty(), "stderr: {:?}", output.stderr);
+}
+
+// T-J17: a reader closing early in json mode hits BrokenPipe while the parent
+// writes the merged document; like text mode it stops cleanly at 0, not 70. One
+// file with many weak tests makes the merged json doc outgrow the pipe buffer.
+#[test]
+fn json_mode_broken_pipe_does_not_panic() {
+    use std::io::Read;
+    use std::process::Stdio;
+
+    let dir = TempDir::new().unwrap();
+    let mut body = String::new();
+    for i in 0..4000 {
+        body.push_str(&format!(
+            "test(\"weak {i}\", () => {{ expect(x).toBeTruthy() }})\n"
+        ));
+    }
+    fs::write(dir.path().join("many.test.ts"), body).unwrap();
+
+    let mut child = litmus_cmd()
+        .arg("--json")
+        .arg(dir.path())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn litmus");
+
+    {
+        let mut out = child.stdout.take().unwrap();
+        let mut buf = [0u8; 64];
+        let _ = out.read(&mut buf);
+        // Dropping `out` closes the read end; further writes hit BrokenPipe.
+    }
+
+    let status = child.wait().expect("failed to wait on litmus");
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "broken pipe must stop cleanly, not exit 70"
+    );
+}
+
 // T-058: a worker that aborts (SIGABRT, uncatchable by catch_unwind) must not
 // kill the whole batch. The parent runs each file in its own subprocess, so the
 // crashed file is reported and the sibling valid file is still analyzed. The
