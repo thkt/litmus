@@ -58,13 +58,13 @@ test-name-quality: src/utils.test.ts:8 works (words: 1)
 
 #### Exit codes
 
-| Code | Meaning                                      |
-| ---- | -------------------------------------------- |
-| 0    | clean (no violations)                        |
-| 1    | warn-level violations only (advisory)        |
-| 2    | blocking violations found                    |
-| 64   | usage error (invalid CLI arguments)          |
-| 70   | internal error (panic / invariant violation) |
+| Code | Meaning                                                              |
+| ---- | -------------------------------------------------------------------- |
+| 0    | clean (no violations)                                                |
+| 1    | warn-level violations only (advisory)                                |
+| 2    | blocking violations found                                            |
+| 64   | usage error (invalid CLI arguments)                                  |
+| 70   | internal error (panic / invariant violation / per-file worker crash) |
 
 Codes 64 and 70 follow [sysexits.h](https://man.openbsd.org/sysexits.3) conventions; codes 0/1/2 follow the hook-tool convention (pass / warn / block). Warn-level rules (`missing-act`, `dummy-data`, `snapshot-external`) emit 1; all other rules emit 2. When both are present, 2 takes precedence.
 

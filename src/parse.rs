@@ -102,30 +102,37 @@ const WEAK_MATCHERS: &[&str] = &["toBeTruthy", "toBeDefined", "toBeFalsy"];
 // are intentionally excluded (high FP vs. the precision indicator).
 const DUMMY_STRINGS: &[&str] = &["foo", "bar", "baz", "qux", "hoge", "fuga"];
 
-// oxc's recursive-descent parser overflows the stack on pathologically nested
-// input. The release floor measured for issue #25 is ~2700 levels of
-// expression bracket nesting (`[[…]]`, `((…))`, `{a:{…}}`, `f(f(…))`); `if`/
-// block nesting overflows higher (~5700). A stack overflow aborts the process
-// with SIGABRT, which `catch_unwind` cannot intercept, so a single
-// deeply-nested file would take down analysis of every other file and violate
-// the ADR-0066 fault-isolation contract. A pre-parse byte scan rejects such a
-// file as a parse error instead, preserving per-file isolation. 500 sits ~5x
-// below the measured floor and ~10x above any realistic source nesting.
+// oxc's recursive-descent parser overflows the native stack on pathologically
+// nested input, aborting with SIGABRT — which `catch_unwind` cannot intercept,
+// so one deep file would take down analysis of every sibling and violate the
+// ADR-0066 fault-isolation contract. Analysis runs on a large stack (main.rs
+// `ANALYZER_STACK_SIZE`, 256 MiB) to push the overflow floor far above any
+// realistic input, but the two recursion shapes need different handling:
 //
-// The floor scales with the main-thread stack size (~3KB/level). The ~2700
-// figure assumes the 8MB default of the only distributed targets (apple-darwin
-// and unknown-linux-gnu, per release.yml — all Unix). A 1MB-stack platform
-// (e.g. Windows) would lower the floor to ~340 and let depths 341-500 slip past
-// the guard into an overflow; revisit this limit before adding such a target.
+//   - Bracket nesting (`[[…]]`, `((…))`, `{a:{…}}`, `f(f(…))`) is detectable
+//     pre-parse by a byte scan, because every opener has a matching closer.
+//     The guard below rejects an over-deep file as a parse error, giving
+//     brackets an absolute no-SIGABRT guarantee independent of stack size.
+//   - Right-associative recursion (ternary alternate spine, assignment `=`,
+//     exponent `**`, prefix-unary) has no closing token, so byte-counting
+//     cannot measure its depth: `a=b=c` recurses 3 deep in 3 bytes while the
+//     left-associative `a===b===c` recurses 0 deep in 6 bytes — byte count is
+//     anti-correlated with depth (issue #56). It cannot be guarded pre-parse;
+//     the large stack alone bounds it, raising its floor to ~250k levels.
+//     Depth past that still SIGABRTs — accepted as unreachable for authored or
+//     transpiled sources, not provably impossible (generated code is the edge).
+//
+// On the 256 MiB stack the bracket overflow floor is ~86k levels (~3KB/level),
+// so 500 sits ~170x below it and ~10x above any realistic source nesting.
 const BRACKET_DEPTH_LIMIT: usize = 500;
 
 // Maximum `{`/`[`/`(` nesting depth in `source`, counted byte-wise without
 // lexing. String, comment, and regex contents inflate the count (an unmatched
 // brace in a string literal is counted), but the wide margin between the limit
-// and both realistic depth (~tens) and the overflow floor (~2700) absorbs that
-// false-positive risk. Only bracket-bearing constructs recurse in oxc; prefix/
-// binary/member/await chains parse iteratively (verified to n=20000), so a
-// bracket scan has no structural blind spot (issue #25).
+// and both realistic depth (~tens) and the in-thread overflow floor (~86k)
+// absorbs that false-positive risk. This catches only bracket nesting;
+// right-associative recursion carries no bracket to count and is bounded by the
+// analyzer stack size instead (`ANALYZER_STACK_SIZE` in main.rs).
 fn max_bracket_depth(source: &str) -> usize {
     let mut depth: usize = 0;
     let mut max = 0;
