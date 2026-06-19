@@ -157,6 +157,43 @@ fn deeply_nested_file_skipped_not_aborted() {
     );
 }
 
+// T-056 (issue #56): a deep right-associative ternary recurses in oxc with no
+// brackets to count, so the #25 depth guard (which scans only `{[(`) lets it
+// through. On the 8MB main stack this overflowed and aborted with SIGABRT
+// (status.code() == None); running analysis on the 256 MiB analyzer thread
+// raises the floor past this depth, so the process exits cleanly and the
+// sibling valid file is still analyzed (exit 2 from its weak assertion).
+#[test]
+fn deep_right_recursive_ternary_rescued_not_aborted() {
+    let dir = TempDir::new().unwrap();
+
+    // 50000 is well past the ~12000 main-stack ternary overflow floor but well
+    // under the ~250000 in-thread floor. The chain `c?c?…?x:y:y` contains no
+    // bracket byte, so max_bracket_depth == 0 and the guard cannot reject it.
+    let n = 50000;
+    let ternary = format!("const z = {}x{};", "c?".repeat(n), ":y".repeat(n));
+    fs::write(dir.path().join("deep.test.ts"), ternary).unwrap();
+
+    fs::write(
+        dir.path().join("valid.test.ts"),
+        r#"test("weak", () => { expect(x).toBeTruthy() })"#,
+    )
+    .unwrap();
+
+    let output = litmus(dir.path());
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "must exit cleanly from the valid file, not abort on SIGABRT"
+    );
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("valid.test.ts"),
+        "sibling valid file must still be analyzed: {stdout}"
+    );
+}
+
 // RC-002: .test.tsx files detected and analyzed
 #[test]
 fn tsx_files_detected() {
