@@ -102,7 +102,55 @@ const WEAK_MATCHERS: &[&str] = &["toBeTruthy", "toBeDefined", "toBeFalsy"];
 // are intentionally excluded (high FP vs. the precision indicator).
 const DUMMY_STRINGS: &[&str] = &["foo", "bar", "baz", "qux", "hoge", "fuga"];
 
+// oxc's recursive-descent parser overflows the stack on pathologically nested
+// input. The release floor measured for issue #25 is ~2700 levels of
+// expression bracket nesting (`[[…]]`, `((…))`, `{a:{…}}`, `f(f(…))`); `if`/
+// block nesting overflows higher (~5700). A stack overflow aborts the process
+// with SIGABRT, which `catch_unwind` cannot intercept, so a single
+// deeply-nested file would take down analysis of every other file and violate
+// the ADR-0066 fault-isolation contract. A pre-parse byte scan rejects such a
+// file as a parse error instead, preserving per-file isolation. 500 sits ~5x
+// below the measured floor and ~10x above any realistic source nesting.
+//
+// The floor scales with the main-thread stack size (~3KB/level). The ~2700
+// figure assumes the 8MB default of the only distributed targets (apple-darwin
+// and unknown-linux-gnu, per release.yml — all Unix). A 1MB-stack platform
+// (e.g. Windows) would lower the floor to ~340 and let depths 341-500 slip past
+// the guard into an overflow; revisit this limit before adding such a target.
+const BRACKET_DEPTH_LIMIT: usize = 500;
+
+// Maximum `{`/`[`/`(` nesting depth in `source`, counted byte-wise without
+// lexing. String, comment, and regex contents inflate the count (an unmatched
+// brace in a string literal is counted), but the wide margin between the limit
+// and both realistic depth (~tens) and the overflow floor (~2700) absorbs that
+// false-positive risk. Only bracket-bearing constructs recurse in oxc; prefix/
+// binary/member/await chains parse iteratively (verified to n=20000), so a
+// bracket scan has no structural blind spot (issue #25).
+fn max_bracket_depth(source: &str) -> usize {
+    let mut depth: usize = 0;
+    let mut max = 0;
+    for &b in source.as_bytes() {
+        match b {
+            b'{' | b'[' | b'(' => {
+                depth += 1;
+                if depth > max {
+                    max = depth;
+                }
+            }
+            b'}' | b']' | b')' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    max
+}
+
 pub fn parse_test_file(source: &str, path: &Path) -> Result<Vec<TestBlock>, String> {
+    if max_bracket_depth(source) > BRACKET_DEPTH_LIMIT {
+        return Err(format!(
+            "bracket nesting depth exceeds limit of {BRACKET_DEPTH_LIMIT}"
+        ));
+    }
+
     let allocator = Allocator::default();
     let source_type =
         SourceType::from_path(path).unwrap_or_else(|_| SourceType::from_path("test.ts").unwrap());
@@ -1019,6 +1067,38 @@ mod tests {
 
     fn parse(source: &str) -> Vec<TestBlock> {
         parse_test_file(source, Path::new("test.tsx")).unwrap()
+    }
+
+    // T-025a: byte-scan reports the deepest bracket nesting, mixing kinds and
+    // ignoring closers past zero.
+    #[test]
+    fn max_bracket_depth_counts_deepest_nesting() {
+        assert_eq!(max_bracket_depth("[[[a]]]"), 3);
+        assert_eq!(max_bracket_depth("f({ a: [1] })"), 3);
+        assert_eq!(max_bracket_depth("))]]}"), 0);
+        assert_eq!(max_bracket_depth(""), 0);
+    }
+
+    // T-025b: a file nested past BRACKET_DEPTH_LIMIT is rejected as a parse
+    // error before reaching oxc, so the stack-overflow abort never happens. The
+    // guard short-circuits, so this never actually parses the deep input.
+    #[test]
+    fn rejects_input_deeper_than_bracket_limit() {
+        let n = BRACKET_DEPTH_LIMIT + 1;
+        let source = format!("const y = {}x{};", "[".repeat(n), "]".repeat(n));
+        let err = parse_test_file(&source, Path::new("test.ts")).unwrap_err();
+        assert!(err.contains("nesting depth"), "err: {err}");
+    }
+
+    // T-025c: depth exactly at the limit is not rejected by the guard (boundary
+    // below the trigger). Verified via the pure scan to avoid parsing deep input
+    // on the test thread's smaller stack.
+    #[test]
+    fn depth_at_limit_is_not_over() {
+        let n = BRACKET_DEPTH_LIMIT;
+        let source = format!("{}x{}", "[".repeat(n), "]".repeat(n));
+        assert_eq!(max_bracket_depth(&source), BRACKET_DEPTH_LIMIT);
+        assert!(max_bracket_depth(&source) <= BRACKET_DEPTH_LIMIT);
     }
 
     // T-001: simple test with assertion
