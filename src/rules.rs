@@ -121,6 +121,10 @@ const MOCK_MATCHERS: &[&str] = &[
     "toHaveBeenCalled",
     "toHaveBeenCalledWith",
     "toHaveBeenCalledTimes",
+    "toHaveBeenCalledOnce",
+    "toHaveBeenCalledExactlyOnceWith",
+    "toHaveBeenCalledBefore",
+    "toHaveBeenCalledAfter",
     "toHaveBeenLastCalledWith",
     "toHaveBeenNthCalledWith",
     "toHaveReturned",
@@ -128,6 +132,11 @@ const MOCK_MATCHERS: &[&str] = &[
     "toHaveReturnedTimes",
     "toHaveLastReturnedWith",
     "toHaveNthReturnedWith",
+    "toHaveResolved",
+    "toHaveResolvedWith",
+    "toHaveResolvedTimes",
+    "toHaveLastResolvedWith",
+    "toHaveNthResolvedWith",
 ];
 
 pub fn check_mock_only(blocks: &[TestBlock], file: &Path) -> Vec<Issue> {
@@ -630,6 +639,27 @@ mod tests {
         )];
         let issues = check_mock_only(&blocks, path());
         assert_eq!(issues.len(), 1);
+    }
+
+    // T-039b: vitest spy matchers missing from the list still count as mock-only (#30)
+    #[test]
+    fn mock_only_vitest_call_and_resolve_matchers() {
+        for matcher in [
+            "toHaveBeenCalledOnce",
+            "toHaveBeenCalledExactlyOnceWith",
+            "toHaveBeenCalledBefore",
+            "toHaveBeenCalledAfter",
+            "toHaveResolved",
+            "toHaveResolvedTimes",
+            "toHaveResolvedWith",
+            "toHaveLastResolvedWith",
+            "toHaveNthResolvedWith",
+        ] {
+            let blocks = vec![block(vec![mock_matcher_assertion(matcher)], vec![])];
+            let issues = check_mock_only(&blocks, path());
+            assert_eq!(issues.len(), 1, "{matcher} should be mock-only");
+            assert_eq!(issues[0].rule, "mock-only");
+        }
     }
 
     fn named_block(name: &str) -> TestBlock {
