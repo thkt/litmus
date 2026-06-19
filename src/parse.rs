@@ -678,24 +678,51 @@ fn scan_expr(
     mocks: &mut Vec<MockCall>,
     context: &AssertionContext,
 ) {
-    match expr {
-        Expression::CallExpression(call) => {
-            if let Some(a) = try_assertion(call, source, context) {
-                assertions.push(a);
-            } else if let Some(m) = try_mock(call, source) {
-                mocks.push(m);
-            } else {
-                // Recurse into callee for chained calls like vi.fn().mockReturnValue()
-                scan_expr(&call.callee, source, assertions, mocks, context);
+    // Iterative worklist instead of recursion. Logical / conditional / member /
+    // callee chains are bracket-free, so the file-level bracket guard (#25)
+    // cannot bound their depth; a recursive walk overflows the stack on
+    // pathological input (tens of thousands of chained `&&`, verified). A heap
+    // stack removes the failure mode at any depth. Children are pushed in
+    // reverse so they pop in source order, preserving assertion indices (left
+    // before right in `a && b`, test before branches in a ternary).
+    let mut stack: Vec<(&Expression<'_>, AssertionContext)> = vec![(expr, *context)];
+    while let Some((expr, context)) = stack.pop() {
+        match expr {
+            Expression::CallExpression(call) => {
+                if let Some(a) = try_assertion(call, source, &context) {
+                    assertions.push(a);
+                } else if let Some(m) = try_mock(call, source) {
+                    mocks.push(m);
+                } else {
+                    // Chained calls like vi.fn().mockReturnValue()
+                    stack.push((&call.callee, context));
+                }
             }
+            Expression::StaticMemberExpression(member) => {
+                stack.push((&member.object, context));
+            }
+            Expression::AwaitExpression(ae) => {
+                stack.push((&ae.argument, context));
+            }
+            Expression::LogicalExpression(logical) => {
+                // Left operand runs unconditionally (keeps the parent context);
+                // the right operand runs only when the operator short-circuits
+                // through, so it is guarded like an if-branch assertion
+                // (e.g. `cond && expect(x).toBe(1)`).
+                stack.push((&logical.right, AssertionContext::IfBranch));
+                stack.push((&logical.left, context));
+            }
+            Expression::ConditionalExpression(conditional) => {
+                // The test runs unconditionally; both branches are guarded.
+                stack.push((&conditional.alternate, AssertionContext::IfBranch));
+                stack.push((&conditional.consequent, AssertionContext::IfBranch));
+                stack.push((&conditional.test, context));
+            }
+            Expression::ParenthesizedExpression(paren) => {
+                stack.push((&paren.expression, context));
+            }
+            _ => {}
         }
-        Expression::StaticMemberExpression(member) => {
-            scan_expr(&member.object, source, assertions, mocks, context);
-        }
-        Expression::AwaitExpression(ae) => {
-            scan_expr(&ae.argument, source, assertions, mocks, context);
-        }
-        _ => {}
     }
 }
 
@@ -1551,6 +1578,68 @@ describe("outer", () => {
         })"#;
         let blocks = parse(source);
         assert_eq!(blocks[0].assertions[0].context, AssertionContext::IfBranch);
+    }
+
+    // T-128: logical-AND right operand assertion is detected (#26 symptom A)
+    #[test]
+    fn logical_and_right_operand_detected() {
+        let blocks = parse(r#"test("x", () => { cond && expect(value).toBe(42) })"#);
+        assert_eq!(blocks[0].assertions.len(), 1);
+    }
+
+    // T-129: logical-AND right operand runs conditionally → IfBranch
+    #[test]
+    fn logical_and_right_operand_is_if_branch() {
+        let blocks = parse(r#"test("x", () => { cond && expect(value).toBe(42) })"#);
+        assert_eq!(blocks[0].assertions[0].context, AssertionContext::IfBranch);
+    }
+
+    // T-130: logical left operand runs unconditionally → keeps parent context
+    #[test]
+    fn logical_left_operand_unconditional() {
+        let blocks = parse(r#"test("x", () => { expect(a).toBe(1) && expect(b).toBe(2) })"#);
+        assert_eq!(blocks[0].assertions.len(), 2);
+        assert_eq!(blocks[0].assertions[0].context, AssertionContext::TopLevel);
+        assert_eq!(blocks[0].assertions[1].context, AssertionContext::IfBranch);
+    }
+
+    // T-131: ternary branch tautological is detected (#26 symptom B)
+    #[test]
+    fn ternary_branch_tautological_detected() {
+        let blocks = parse(r#"test("x", () => { cond ? expect(true).toBe(true) : null })"#);
+        assert_eq!(blocks[0].assertions.len(), 1);
+        assert_eq!(blocks[0].assertions[0].target_kind, TargetKind::Literal);
+        assert_eq!(blocks[0].assertions[0].context, AssertionContext::IfBranch);
+    }
+
+    // T-132: both ternary branches are scanned
+    #[test]
+    fn ternary_both_branches_detected() {
+        let blocks = parse(r#"test("x", () => { cond ? expect(a).toBe(1) : expect(b).toBe(2) })"#);
+        assert_eq!(blocks[0].assertions.len(), 2);
+    }
+
+    // T-135: ternary test operand runs unconditionally → keeps parent context
+    #[test]
+    fn ternary_test_operand_unconditional() {
+        let blocks = parse(r#"test("x", () => { expect(a).toBe(1) ? x : y })"#);
+        assert_eq!(blocks[0].assertions.len(), 1);
+        assert_eq!(blocks[0].assertions[0].context, AssertionContext::TopLevel);
+    }
+
+    // T-133: assertion wrapped in parentheses is detected
+    #[test]
+    fn parenthesized_assertion_detected() {
+        let blocks = parse(r#"test("x", () => { (cond && expect(x).toBe(1)) })"#);
+        assert_eq!(blocks[0].assertions.len(), 1);
+        assert_eq!(blocks[0].assertions[0].context, AssertionContext::IfBranch);
+    }
+
+    // T-134: call arguments are not traversed (accepted FN boundary, #26)
+    #[test]
+    fn call_argument_not_traversed() {
+        let blocks = parse(r#"test("x", () => { setTimeout(() => expect(x).toBe(1)) })"#);
+        assert_eq!(blocks[0].assertions.len(), 0);
     }
 
     // T-112: catch with throw e → no catch_swallow
