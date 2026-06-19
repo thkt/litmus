@@ -57,13 +57,13 @@ test-name-quality: src/utils.test.ts:8 works (words: 1)
 
 #### 終了コード
 
-| Code | 意味                                     |
-| ---- | ---------------------------------------- |
-| 0    | クリーン (違反なし)                      |
-| 1    | warn レベルの違反のみ (advisory)         |
-| 2    | blocking の違反を検出                    |
-| 64   | usage エラー (CLI 引数が不正)            |
-| 70   | 内部エラー (panic / invariant violation) |
+| Code | 意味                                                                   |
+| ---- | ---------------------------------------------------------------------- |
+| 0    | クリーン (違反なし)                                                    |
+| 1    | warn レベルの違反のみ (advisory)                                       |
+| 2    | blocking の違反を検出                                                  |
+| 64   | usage エラー (CLI 引数が不正)                                          |
+| 70   | 内部エラー (panic / invariant violation / ファイル単位の worker crash) |
 
 64 と 70 は [sysexits.h](https://man.openbsd.org/sysexits.3) 準拠、0/1/2 は hook ツールの慣例 (pass / warn / block)。warn レベルのルール (`missing-act`, `dummy-data`, `snapshot-external`) は 1、それ以外のルールは 2 を返す。両方ある場合は 2 が優先。
 

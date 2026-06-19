@@ -26,7 +26,8 @@ const EXCLUDED_DIRS: &[&str] = &["node_modules", ".git", "dist", "build", "targe
 //   1  (reserved)    advisory; reserved for future warn-level rules
 //   2  (convention)  blocking failure (violations detected)
 //   64 EX_USAGE      bad command-line usage
-//   70 EX_SOFTWARE   internal error (panic / invariant violation)
+//   70 EX_SOFTWARE   internal error (panic / invariant violation /
+//                    per-file worker crash or spawn failure)
 //
 // Not adopted (ADR-0066 Confirmation requires reasons):
 //   65 EX_DATAERR    input is a dir path only; no malformed-data concept
