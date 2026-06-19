@@ -1756,6 +1756,30 @@ describe("outer", () => {
         assert_eq!(blocks[0].catch_swallows.len(), 1);
     }
 
+    // T-112e: rethrow nested in each control-flow construct → no swallow (#27)
+    #[test]
+    fn nested_rethrow_in_each_construct_no_swallow() {
+        let catch_bodies = [
+            "for (let i = 0; i < 1; i++) { throw e }",
+            "for (const k in obj) { throw e }",
+            "while (e) { throw e }",
+            "do { throw e } while (e)",
+            "switch (e) { default: throw e }",
+            "try { throw e } finally {}",
+            "try { x() } catch (inner) { throw inner }",
+            "try { x() } finally { throw e }",
+        ];
+        for body in catch_bodies {
+            let source =
+                format!(r#"test("x", () => {{ try {{ risky() }} catch (e) {{ {body} }} }})"#);
+            let blocks = parse(&source);
+            assert!(
+                blocks[0].catch_swallows.is_empty(),
+                "should not swallow with catch body: {body}"
+            );
+        }
+    }
+
     // T-114: empty body → has_empty_body == true
     #[test]
     fn empty_body_detected() {
