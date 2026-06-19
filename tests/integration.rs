@@ -561,6 +561,49 @@ fn bad_usage_too_many_positional_args() {
     );
 }
 
+// T-029d: a nonexistent path is a usage error (exit 64), not a silent clean
+// exit 0; stderr names the missing path so a CI / hook caller can correct it.
+#[test]
+fn nonexistent_path_is_usage_error() {
+    let dir = TempDir::new().unwrap();
+    let missing = dir.path().join("does_not_exist_xyz");
+
+    let output = litmus_cmd()
+        .arg(&missing)
+        .output()
+        .expect("failed to run litmus");
+
+    assert_eq!(output.status.code(), Some(64));
+
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("does not exist"),
+        "stderr should report the missing path: {stderr}"
+    );
+}
+
+// T-029e: a file path (litmus expects a directory) is a usage error (exit 64),
+// not a clean exit 0 that masks the file's weak assertions as "no findings".
+#[test]
+fn file_path_is_usage_error() {
+    let dir = TempDir::new().unwrap();
+    let file = dir.path().join("bad.test.ts");
+    fs::write(&file, r#"test("t", () => { expect(x).toBeTruthy() })"#).unwrap();
+
+    let output = litmus_cmd()
+        .arg(&file)
+        .output()
+        .expect("failed to run litmus");
+
+    assert_eq!(output.status.code(), Some(64));
+
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("not a directory"),
+        "stderr should label the file as not a directory: {stderr}"
+    );
+}
+
 // T-411: usage error - unknown flag → exit 64
 #[test]
 fn bad_usage_unknown_flag() {

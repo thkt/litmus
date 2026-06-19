@@ -98,12 +98,35 @@ fn run_worker(file: &Path, json: bool) -> Result<u8, LitmusError> {
     Ok(select_exit_code(&result.issues))
 }
 
+// litmus's input contract is a directory path. A nonexistent path or a file
+// (e.g. a single `.test.ts` passed directly) globs to zero matches and would
+// otherwise exit 0 "clean", masking bad input as "no findings" — a silent false
+// negative for a CI / hook caller. Reject it as a usage error (exit 64) so the
+// caller can tell "scanned, 0 violations" from "scanned nothing, input was
+// wrong". An existing empty directory is valid input and still yields exit 0.
+fn validate_scan_dir(dir: &Path) -> Result<(), LitmusError> {
+    if !dir.exists() {
+        return Err(LitmusError::Usage(format!(
+            "path does not exist: {}",
+            dir.display()
+        )));
+    }
+    if !dir.is_dir() {
+        return Err(LitmusError::Usage(format!(
+            "not a directory: {}",
+            dir.display()
+        )));
+    }
+    Ok(())
+}
+
 // The parent never parses; it spawns one worker subprocess per file and
 // aggregates their results, so no analysis crash can reach this process. The
 // worker is `current_exe` re-invoked with `--worker-file`; if that path cannot
 // be resolved there is no safe in-process fallback (running analysis here would
 // reintroduce the crash this layer exists to prevent), so it is a hard error.
 fn run_scan(dir: &Path, json: bool) -> Result<u8, LitmusError> {
+    validate_scan_dir(dir)?;
     let files = find_test_files(dir);
     let exe = env::current_exe()
         .map_err(|e| LitmusError::Internal(format!("cannot locate litmus executable: {e}")))?;
@@ -384,7 +407,7 @@ fn parse_args(args: &[String]) -> Result<Config, LitmusError> {
 mod tests {
     use super::{
         EXIT_BLOCKING, EXIT_WARNING, Issue, analyze_files, find_test_files, parse_args,
-        run_analysis_with_stack, select_exit_code,
+        run_analysis_with_stack, select_exit_code, validate_scan_dir,
     };
     use std::fs;
     use std::path::PathBuf;
@@ -424,6 +447,39 @@ mod tests {
             direct.issues.len(),
             "fallback must return the same analysis as a direct call"
         );
+    }
+
+    // T-029a: a nonexistent path is a usage error, not a clean exit 0; the
+    // message names the offending path so the caller can correct it.
+    #[test]
+    fn validate_scan_dir_rejects_nonexistent_path() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let missing = dir.path().join("does_not_exist_xyz");
+        assert!(
+            matches!(validate_scan_dir(&missing), Err(litmus::LitmusError::Usage(m)) if m.contains("does not exist")),
+            "expected a usage error naming the missing path"
+        );
+    }
+
+    // T-029b: a file path (not a directory) is a usage error; litmus's input
+    // contract is a directory, and a file globs to zero matches → false exit 0.
+    #[test]
+    fn validate_scan_dir_rejects_file_path() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let file = dir.path().join("bad.test.ts");
+        fs::write(&file, "test(\"t\", () => {})").unwrap();
+        assert!(
+            matches!(validate_scan_dir(&file), Err(litmus::LitmusError::Usage(m)) if m.contains("not a directory")),
+            "expected a usage error labeling the file as not a directory"
+        );
+    }
+
+    // T-029c: an existing directory is valid input even when empty; "0 test
+    // files" stays a clean exit 0, distinct from bad input.
+    #[test]
+    fn validate_scan_dir_accepts_existing_dir() {
+        let dir = tempfile::TempDir::new().unwrap();
+        assert!(validate_scan_dir(dir.path()).is_ok());
     }
 
     // T-407: only warning-level issues → exit 1
