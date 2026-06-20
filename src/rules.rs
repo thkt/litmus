@@ -255,6 +255,13 @@ pub fn check_mock_only(blocks: &[TestBlock], file: &Path) -> Vec<Issue> {
 pub fn check_empty_test(blocks: &[TestBlock], file: &Path) -> Vec<Issue> {
     let mut issues = Vec::new();
     for block in blocks {
+        // it.todo is the idiomatic placeholder for an unwritten test; its empty
+        // body is intended, so empty-test on a todo is a false positive.
+        // skipped-test already owns it. Scoped to Todo: an empty it.skip is not
+        // a placeholder and still warrants empty-test.
+        if matches!(block.modifier, Some(TestModifier::Todo)) {
+            continue;
+        }
         if block.has_empty_body {
             issues.push(Issue::new(
                 "empty-test",
@@ -891,6 +898,25 @@ mod tests {
         let blocks = vec![empty_block()];
         let issues = check_weak_assertions(&blocks, path());
         assert_eq!(issues.len(), 0);
+    }
+
+    // T-222: it.todo is an idiomatic placeholder whose empty body is intended,
+    // so empty-test is suppressed (a false positive); skipped-test still owns it
+    #[test]
+    fn empty_test_suppressed_for_todo() {
+        let mut b = empty_block();
+        b.modifier = Some(TestModifier::Todo);
+        assert_eq!(check_empty_test(from_ref(&b), path()).len(), 0);
+        assert_eq!(check_skipped_test(&[b], path()).len(), 1);
+    }
+
+    // T-223: an empty it.skip is not a placeholder (plausibly mid-edit), so
+    // empty-test still fires — the suppression is scoped to Todo, not all skips
+    #[test]
+    fn empty_test_fires_for_empty_skip() {
+        let mut b = empty_block();
+        b.modifier = Some(TestModifier::Skip);
+        assert_eq!(check_empty_test(&[b], path()).len(), 1);
     }
 
     // T-204, T-205: Skip and Todo → skipped-test
