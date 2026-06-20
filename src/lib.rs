@@ -1,5 +1,7 @@
 pub mod json;
 pub mod parse;
+#[cfg(test)]
+mod precision;
 pub mod rules;
 
 use parse::parse_test_file;
@@ -158,35 +160,41 @@ pub fn analyze_files(files: &[PathBuf]) -> AnalysisResult {
             }
         };
 
-        let blocks = match parse_test_file(&source, file) {
-            Ok(blocks) => blocks,
-            Err(e) => {
-                errors.push(FileError {
-                    file: file.clone(),
-                    kind: FileErrorKind::Parse,
-                    message: e.to_string(),
-                });
-                continue;
-            }
-        };
-
-        issues.extend(check_empty_test(&blocks, file));
-        issues.extend(check_skipped_test(&blocks, file));
-        issues.extend(check_catch_swallow(&blocks, file));
-        issues.extend(check_catch_masks_assertion(&blocks, file));
-        issues.extend(check_conditional_assertion(&blocks, file));
-        issues.extend(check_catch_only_assertion(&blocks, file));
-        issues.extend(check_weak_assertions(&blocks, file));
-        issues.extend(check_mock_overuse(&blocks, file));
-        issues.extend(check_tautological(&blocks, file));
-        issues.extend(check_mock_only(&blocks, file));
-        issues.extend(check_test_name(&blocks, file));
-        issues.extend(check_dummy_data(&blocks, file));
-        issues.extend(check_missing_act(&blocks, file));
-        issues.extend(check_snapshot_external(&blocks, file));
+        match analyze_source(&source, file) {
+            Ok(file_issues) => issues.extend(file_issues),
+            Err(message) => errors.push(FileError {
+                file: file.clone(),
+                kind: FileErrorKind::Parse,
+                message,
+            }),
+        }
     }
 
     AnalysisResult { issues, errors }
+}
+
+// Parses one test source and runs every rule against it, returning the findings
+// in the same fixed order as analyze_files' per-file pass. Extracted so the
+// precision corpus drives the identical rule sequence as production analysis;
+// adding or reordering a rule here changes both at once and cannot drift.
+pub(crate) fn analyze_source(source: &str, file: &Path) -> Result<Vec<Issue>, String> {
+    let blocks = parse_test_file(source, file)?;
+    let mut issues = Vec::new();
+    issues.extend(check_empty_test(&blocks, file));
+    issues.extend(check_skipped_test(&blocks, file));
+    issues.extend(check_catch_swallow(&blocks, file));
+    issues.extend(check_catch_masks_assertion(&blocks, file));
+    issues.extend(check_conditional_assertion(&blocks, file));
+    issues.extend(check_catch_only_assertion(&blocks, file));
+    issues.extend(check_weak_assertions(&blocks, file));
+    issues.extend(check_mock_overuse(&blocks, file));
+    issues.extend(check_tautological(&blocks, file));
+    issues.extend(check_mock_only(&blocks, file));
+    issues.extend(check_test_name(&blocks, file));
+    issues.extend(check_dummy_data(&blocks, file));
+    issues.extend(check_missing_act(&blocks, file));
+    issues.extend(check_snapshot_external(&blocks, file));
+    Ok(issues)
 }
 
 #[cfg(test)]
@@ -234,5 +242,33 @@ mod error_tests {
             e.to_string(),
             "litmus: internal error: invariant: empty path"
         );
+    }
+}
+
+#[cfg(test)]
+mod analyze_source_tests {
+    use super::analyze_source;
+    use std::path::Path;
+
+    // T-001: analyze_source runs the full rule pass on a parseable source. A
+    // weak-only test yields exactly the weak-assertion finding the production
+    // pipeline emits.
+    #[test]
+    fn returns_issues_for_parseable_source() {
+        let source = "test(\"checks\", () => { expect(x).toBeTruthy(); });";
+        let issues = analyze_source(source, Path::new("a.test.ts")).expect("parses");
+        assert!(
+            issues.iter().any(|i| i.rule == "weak-assertion"),
+            "expected weak-assertion, got: {:?}",
+            issues.iter().map(|i| i.rule).collect::<Vec<_>>()
+        );
+    }
+
+    // T-002: a syntax error propagates as Err rather than silently yielding an
+    // empty finding set, so a parse failure cannot be read as a clean verdict.
+    #[test]
+    fn returns_err_for_unparseable_source() {
+        let source = "const = ;";
+        assert!(analyze_source(source, Path::new("broken.test.ts")).is_err());
     }
 }

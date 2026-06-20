@@ -1,0 +1,4 @@
+test("returns the sum of two positive numbers", () => {
+  const result = add(2, 3);
+  expect(result).toBe(5);
+});

@@ -1,0 +1,7 @@
+test("captures the failure from the parser", () => {
+  try {
+    parse(input);
+  } catch (e) {
+    expect(e.message).toBe("unexpected token");
+  }
+});

@@ -1,0 +1,4 @@
+test("matches the rendered invoice total", () => {
+  const invoice = render(order);
+  expect(invoice.total).toBe(1200);
+});

@@ -1,0 +1,4 @@
+test("persists the record to the store", () => {
+  const id = store.save(record);
+  expect(id).toBe(1);
+});

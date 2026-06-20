@@ -1,0 +1,8 @@
+test("validates the user payload shape", () => {
+  const user = parseUser(input);
+  try {
+    expect(user.id).toBe(7);
+  } catch (e) {
+    expect(e).toBeDefined();
+  }
+});

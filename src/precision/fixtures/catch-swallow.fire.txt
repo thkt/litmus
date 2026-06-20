@@ -1,0 +1,8 @@
+test("loads configuration from disk", () => {
+  const config = loadConfig();
+  try {
+    config.validate();
+  } catch (e) {
+  }
+  expect(config.valid).toBe(true);
+});

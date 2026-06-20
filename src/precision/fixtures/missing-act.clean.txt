@@ -1,0 +1,5 @@
+test("derives the full name from parts", () => {
+  const user = { first: "Ann", last: "Lee" };
+  const full = fullName(user);
+  expect(full).toBe("Ann Lee");
+});

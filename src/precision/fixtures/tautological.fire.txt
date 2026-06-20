@@ -1,0 +1,3 @@
+test("confirms the boolean literal is true", () => {
+  expect(true).toBe(true);
+});

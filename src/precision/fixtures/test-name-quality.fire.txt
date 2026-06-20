@@ -1,0 +1,4 @@
+test("works", () => {
+  const result = compute();
+  expect(result).toBe(42);
+});

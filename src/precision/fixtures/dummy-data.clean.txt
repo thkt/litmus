@@ -1,0 +1,4 @@
+test("uppercases the provided first name", () => {
+  const result = normalize("alice");
+  expect(result).toBe("ALICE");
+});

@@ -1,0 +1,3 @@
+test("rejects an invalid configuration file", () => {
+  expect(() => loadConfig("missing")).toThrow();
+});
