@@ -85,7 +85,16 @@ fn scan(sample: &CorpusSample) -> Vec<Issue> {
 }
 
 const LATENCY_ITERATIONS: usize = 50;
-const LATENCY_BUDGET_US: u128 = 10_000;
+// Per-file scan budget at the median. The slowest fixture measures ~66us/file
+// (debug median, audit 2026-06-20) and ~35us on a 2026-06-21 recheck, so this
+// budget sits within an order of magnitude of the measurement. A 2-digit (>=10x)
+// latency regression therefore breaches it. The prior 10_000us budget was ~150x
+// the measurement, wide enough that a 2-digit regression stayed green and the
+// Time indicator's drift detector was effectively dead.
+const LATENCY_BUDGET_US: u128 = 500;
+// Slowest fixture median observed in the audit (debug build); the regression
+// guard below pins the budget to within an order of magnitude of it.
+const OBSERVED_SLOWEST_US: u128 = 66;
 
 // Median scan latency in microseconds over LATENCY_ITERATIONS runs. Median
 // rather than mean so a single scheduler stall does not dominate the budget.
@@ -211,10 +220,10 @@ fn clean_fixtures_stay_silent() {
     }
 }
 
-// T-024: every fixture scans under the 10ms/file budget at the median, and the
-// slowest sample is reported to stderr for the Time indicator.
+// T-024: every fixture scans under the per-file latency budget at the median,
+// and the slowest sample is reported to stderr for the Time indicator.
 #[test]
-fn every_sample_scans_under_10ms() {
+fn every_sample_scans_under_budget() {
     let mut slowest_us = 0;
     let mut slowest_path = "";
     for sample in CORPUS {
@@ -232,6 +241,19 @@ fn every_sample_scans_under_10ms() {
     eprintln!(
         "NFR Time: slowest fixture {slowest_path} at {slowest_us}us/file median \
          over {LATENCY_ITERATIONS} iterations (budget {LATENCY_BUDGET_US}us)"
+    );
+}
+
+// T-026: the latency budget stays within an order of magnitude of the measured
+// slowest median, so a 2-digit (>=10x) regression breaches it instead of
+// passing green. Guards against re-widening the budget back to a dead detector
+// (the prior 10_000us was ~150x the measurement).
+#[test]
+fn latency_budget_catches_two_digit_regression() {
+    assert!(
+        LATENCY_BUDGET_US <= OBSERVED_SLOWEST_US * 10,
+        "budget {LATENCY_BUDGET_US}us exceeds 10x the observed {OBSERVED_SLOWEST_US}us \
+         slowest median; a 2-digit latency regression would pass undetected"
     );
 }
 

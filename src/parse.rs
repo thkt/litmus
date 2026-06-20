@@ -2441,6 +2441,69 @@ describe("outer", () => {
         assert_eq!(blocks[0].assertions[0].target_root.as_deref(), Some("x"));
     }
 
+    // T-416: the transparent-wrapper set must stay synchronized across the four
+    // traversal functions that see through wrappers — scan_expr (assertion
+    // discovery), find_expect_target (matcher target), expr_root_ident (target
+    // root), expr_has_act (act detection). This is a checklist, not a mechanical
+    // drift detector: it verifies each LISTED wrapper is transparent on all four
+    // paths. Adding a new transparent wrapper still requires human discipline to
+    // update all four functions AND this list; only a single shared unwrap
+    // helper would make divergence structurally impossible (issue #70). Listing
+    // the set in one place keeps the four-way agreement reviewable in one test.
+    #[test]
+    fn transparent_wrappers_stay_synced_across_traversals() {
+        // (label, prefix, suffix) per wrapper. Parsed as `.ts`: the
+        // type-assertion form `<any>x` is JSX-ambiguous and invalid in `.tsx`.
+        let wrappers: &[(&str, &str, &str)] = &[
+            ("paren", "(", ")"),
+            ("as", "", " as any"),
+            ("satisfies", "", " satisfies unknown"),
+            ("non-null", "", "!"),
+            ("type-assertion", "<any>", ""),
+        ];
+
+        for (label, pre, suf) in wrappers {
+            // scan_expr: a wrapped assertion statement is still discovered.
+            let blocks = parse_ts(&format!(
+                r#"test("t", () => {{ {pre}expect(v).toBe(1){suf} }})"#
+            ));
+            assert_eq!(
+                blocks[0].assertions.len(),
+                1,
+                "scan_expr lost the assertion through `{label}`"
+            );
+
+            // find_expect_target: a wrapper between expect() and its matcher
+            // still resolves the target. Outer parens keep suffix wrappers a
+            // valid member receiver.
+            let blocks = parse_ts(&format!(
+                r#"test("t", () => {{ ({pre}expect(user.name){suf}).toBe(1) }})"#
+            ));
+            assert_eq!(
+                blocks[0].assertions[0].target, "user.name",
+                "find_expect_target lost the target through `{label}`"
+            );
+
+            // expr_root_ident: a wrapper around the expect argument still
+            // resolves the root identifier.
+            let blocks = parse_ts(&format!(
+                r#"test("t", () => {{ expect({pre}user{suf}.name).toBe(1) }})"#
+            ));
+            assert_eq!(
+                blocks[0].assertions[0].target_root.as_deref(),
+                Some("user"),
+                "expr_root_ident lost the root through `{label}`"
+            );
+
+            // expr_has_act: a wrapped production call is still an Act.
+            let blocks = parse_ts(&format!(r#"test("t", () => {{ {pre}doWork(){suf} }})"#));
+            assert!(
+                blocks[0].has_act,
+                "expr_has_act lost the act through `{label}`"
+            );
+        }
+    }
+
     // T-291: an unrecognized `vi.*` setup call is treated as an Act, not a mock
     #[test]
     fn unknown_vi_call_is_act() {
