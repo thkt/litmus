@@ -35,6 +35,13 @@ fn severity_str(severity: Severity) -> &'static str {
     }
 }
 
+// Schema-stability contract (consumers depend on the exact shape, pinned by the
+// byte-equality tests T-J0x):
+//   - field order is fixed (rule, severity, file, line, test_name, detail) and
+//     forms a de-facto compatibility contract — reordering is a breaking change.
+//   - `line` is emitted as a bare JSON number; every other field is a string.
+//   - hand-written serialization (no serde) keeps the hook-path startup cost
+//     down, so the format moves only by editing this string deliberately.
 fn render_issue(issue: &Issue) -> String {
     format!(
         "{{\"rule\":\"{}\",\"severity\":\"{}\",\"file\":\"{}\",\"line\":{},\"test_name\":\"{}\",\"detail\":\"{}\"}}",
@@ -82,7 +89,9 @@ pub fn render_fragments(result: &AnalysisResult) -> (String, String) {
     (issues, errors)
 }
 
-/// Render the full analysis result as a single JSON document for stdout.
+/// Render the full analysis result as a single JSON document for stdout. An
+/// empty result renders the arrays as `[]` (never null or omitted), so a
+/// consumer can always index `.issues` / `.errors` as arrays (pinned by T-J02).
 pub fn render_result(result: &AnalysisResult) -> String {
     let (issues, errors) = render_fragments(result);
     format!("{{\"issues\":[{issues}],\"errors\":[{errors}]}}")

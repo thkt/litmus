@@ -60,15 +60,22 @@ fn run(args: &[String]) -> Result<u8, LitmusError> {
     run_scan(&config.dir, config.json)
 }
 
+// The worker/parent split implements the ADR-0066 fault-isolation contract,
+// which rests on three guarantees kept here and in the parent loops:
+//   1. one worker per file, single layer — a worker analyzes exactly one file
+//      in-process and never spawns children, so a worker that aborts (stack
+//      overflow, oxc panic, OOM) takes down only its own process, never the batch.
+//   2. a spawn failure does not abort the batch (it is a crash-class error and
+//      `continue`s; see run_scan_text / run_scan_json).
+//   3. the worker->parent wire format is newline-framed `issues_frag\nerrors_frag`,
+//      unambiguous because `escape` strips every control char from both fragments.
+//
 // A worker analyzes exactly one file in-process (on the large-stack analyzer
-// thread + bracket guard) and emits its result, then exits. It never spawns
-// children. The parent runs one worker per file, so a worker that aborts (stack
-// overflow, oxc panic, OOM) takes down only its own process, never the batch.
+// thread + bracket guard) and emits its result, then exits.
 //
 // Output mirrors the pre-subprocess single-process format so the parent can
-// relay it: text issues to stdout / errors to stderr; json as newline-framed
-// `issues_frag\nerrors_frag` (both fragments are newline-free, so the frame is
-// unambiguous) which the parent merges into one document.
+// relay it: text issues to stdout / errors to stderr; json as the newline-framed
+// fragments above, which the parent merges into one document.
 fn run_worker(file: &Path, json: bool) -> Result<u8, LitmusError> {
     let files = [file.to_path_buf()];
     let result = run_analysis(&files);
@@ -137,12 +144,33 @@ fn run_scan(dir: &Path, json: bool) -> Result<u8, LitmusError> {
     }
 }
 
+// A worker subprocess exits with a code that mirrors the EXIT_* contract; the
+// parent maps it back onto that contract here. Matching the EXIT_* constants
+// (not 0/1/2 literals) keeps the mapping correct if a constant's value changes,
+// so the aggregation precedence never silently breaks when lib.rs is edited.
+enum WorkerOutcome {
+    // The worker exited cleanly with a contract code (success / warning / blocking).
+    Code(u8),
+    // A death by signal (code == None) or an unrecognized code: a worker crash.
+    Crash,
+}
+
+fn classify_worker_code(code: Option<i32>) -> WorkerOutcome {
+    match code {
+        Some(c) if c == i32::from(EXIT_SUCCESS) => WorkerOutcome::Code(EXIT_SUCCESS),
+        Some(c) if c == i32::from(EXIT_WARNING) => WorkerOutcome::Code(EXIT_WARNING),
+        Some(c) if c == i32::from(EXIT_BLOCKING) => WorkerOutcome::Code(EXIT_BLOCKING),
+        _ => WorkerOutcome::Crash,
+    }
+}
+
 // Text mode: workers inherit stdout/stderr and write directly, so the parent
-// only tracks the exit code (max wins). The 0/1/2 worker codes mirror
-// EXIT_SUCCESS / EXIT_WARNING / EXIT_BLOCKING (they cannot be const match arms,
-// so the literals carry that contract by comment). Any other code, or a death
-// by signal, is a worker crash: the parent synthesizes a crash-class error on
-// stderr and raises max to EXIT_SOFTWARE so the failure is loud, not a silent
+// only tracks the exit code. Severity aggregates by `max` over the EXIT_*
+// constants, whose values encode the precedence crash (70) > blocking (2) >
+// warning (1) > clean (0): the highest-severity worker decides the batch exit
+// code. Any unrecognized code, or a death by signal, is a worker crash: the
+// parent synthesizes a crash-class error on stderr and raises max to
+// EXIT_SOFTWARE so the failure is loud, not a silent
 // exit 0. A spawn failure is the same crash class (a worker that never launched
 // is no more isolated than one that aborts) and must not `?`-abort the batch,
 // otherwise one failed launch near a process limit discards every prior result.
@@ -162,11 +190,9 @@ fn run_scan_text(exe: &Path, files: &[PathBuf]) -> Result<u8, LitmusError> {
                 continue;
             }
         };
-        match code {
-            Some(0) => {}
-            Some(1) => max = max.max(EXIT_WARNING),
-            Some(2) => max = max.max(EXIT_BLOCKING),
-            _ => {
+        match classify_worker_code(code) {
+            WorkerOutcome::Code(c) => max = max.max(c),
+            WorkerOutcome::Crash => {
                 let err = FileError {
                     file: file.clone(),
                     kind: FileErrorKind::Crash,
@@ -201,13 +227,9 @@ fn run_scan_json(exe: &Path, files: &[PathBuf]) -> Result<u8, LitmusError> {
             }
         };
         let code = output.status.code();
-        match code {
-            Some(c @ 0..=2) => {
-                if c == 1 {
-                    max = max.max(EXIT_WARNING);
-                } else if c == 2 {
-                    max = max.max(EXIT_BLOCKING);
-                }
+        match classify_worker_code(code) {
+            WorkerOutcome::Code(c) => {
+                max = max.max(c);
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 if let Some((issues, errors)) = stdout.split_once('\n') {
                     if !issues.is_empty() {
@@ -224,7 +246,7 @@ fn run_scan_json(exe: &Path, files: &[PathBuf]) -> Result<u8, LitmusError> {
                     max = max.max(EXIT_SOFTWARE);
                 }
             }
-            _ => {
+            WorkerOutcome::Crash => {
                 error_frags.push(crash_error_frag(file, &worker_abort_message(code)));
                 max = max.max(EXIT_SOFTWARE);
             }
@@ -309,6 +331,12 @@ fn crash_error_frag(file: &Path, message: &str) -> String {
 // overflow floor to ~250k levels (measured: ~200k parses, ~300k aborts) — ~4
 // orders of magnitude above any human-authored or transpiled test source. The
 // size is a lazy virtual reservation (guard-paged), not a physical commit.
+//
+// This stack only bounds the right-associative shapes. Bracket-nesting recursion
+// is rejected pre-parse by parse.rs `BRACKET_DEPTH_LIMIT`, which is sized against
+// this stack's bracket overflow floor (~86k levels at ~3KB/frame): shrinking
+// ANALYZER_STACK_SIZE lowers that floor, so the two constants are coupled and
+// must move together.
 const ANALYZER_STACK_SIZE: usize = 256 * 1024 * 1024;
 
 fn run_analysis(files: &[PathBuf]) -> AnalysisResult {
@@ -406,8 +434,9 @@ fn parse_args(args: &[String]) -> Result<Config, LitmusError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        EXIT_BLOCKING, EXIT_WARNING, Issue, analyze_files, find_test_files, parse_args,
-        run_analysis_with_stack, select_exit_code, validate_scan_dir,
+        EXIT_BLOCKING, EXIT_SOFTWARE, EXIT_SUCCESS, EXIT_WARNING, Issue, WorkerOutcome,
+        analyze_files, classify_worker_code, find_test_files, parse_args, run_analysis_with_stack,
+        select_exit_code, validate_scan_dir,
     };
     use std::fs;
     use std::path::PathBuf;
@@ -523,5 +552,30 @@ mod tests {
             matches!(parse_args(&args), Err(litmus::LitmusError::Usage(m)) if m.contains("--worker-file")),
             "expected a usage error naming --worker-file when no value follows"
         );
+    }
+
+    // T-058: the parent aggregates worker exit codes by `max` over the EXIT_*
+    // constants, whose ordering encodes crash > blocking > warning > clean.
+    // classify_worker_code maps each contract code through those constants (not
+    // 0/1/2 literals), so a change to any constant value re-derives the expected
+    // mapping here and a stale literal would be caught instead of silently
+    // breaking the precedence.
+    #[test]
+    fn worker_code_classifier_tracks_exit_constants() {
+        assert!(EXIT_SUCCESS < EXIT_WARNING);
+        assert!(EXIT_WARNING < EXIT_BLOCKING);
+        assert!(EXIT_BLOCKING < EXIT_SOFTWARE);
+        for code in [EXIT_SUCCESS, EXIT_WARNING, EXIT_BLOCKING] {
+            match classify_worker_code(Some(i32::from(code))) {
+                WorkerOutcome::Code(c) => assert_eq!(c, code),
+                WorkerOutcome::Crash => panic!("contract code {code} misclassified as crash"),
+            }
+        }
+        // signal death and an internal-error worker (exit 70) are both crashes
+        assert!(matches!(classify_worker_code(None), WorkerOutcome::Crash));
+        assert!(matches!(
+            classify_worker_code(Some(i32::from(EXIT_SOFTWARE))),
+            WorkerOutcome::Crash
+        ));
     }
 }
