@@ -24,10 +24,11 @@ const WARNING_RULES: &[&str] = &["dummy-data", "missing-act", "snapshot-external
 
 // Every rule name litmus can emit. The precision corpus gate requires a
 // fire+clean fixture pair for each entry, so a new rule must be added here to
-// be measured. This is a manual catalog, not a registry derived from
-// analyze_source: adding a rule to the analysis pass without adding it here is
-// NOT caught (litmus has no single rule registry yet — see #32 follow-up). It
-// guards fixture coverage and rule-name typos, not rule enrolment.
+// be measured. checks_count_matches_rule_catalog pins this list's length to
+// CHECKS, so a rule added to the analysis pass without a catalog entry (or vice
+// versa) fails the build. It still does not verify name-by-name correspondence,
+// so it guards fixture coverage, rule-name typos, and count drift — not which
+// specific name maps to which check_*.
 pub const RULE_CATALOG: &[&str] = &[
     "catch-masks-assertion",
     "catch-only-assertion",
@@ -43,6 +44,30 @@ pub const RULE_CATALOG: &[&str] = &[
     "tautological",
     "test-name-quality",
     "weak-assertion",
+];
+
+// The analysis pass over every check_* rule function. analyze_source iterates
+// this slice instead of hand-listing each call, so a rule is enrolled in one
+// place. checks_count_matches_rule_catalog pins CHECKS.len() to RULE_CATALOG so
+// the two manual lists cannot drift. Order is irrelevant: each check_* gates its
+// own findings internally (e.g. empty-test via has_empty_body), so extend order
+// does not affect output.
+pub type CheckFn = fn(&[TestBlock], &Path) -> Vec<Issue>;
+pub const CHECKS: &[CheckFn] = &[
+    check_empty_test,
+    check_skipped_test,
+    check_catch_swallow,
+    check_catch_masks_assertion,
+    check_conditional_assertion,
+    check_catch_only_assertion,
+    check_weak_assertions,
+    check_mock_overuse,
+    check_tautological,
+    check_mock_only,
+    check_test_name,
+    check_dummy_data,
+    check_missing_act,
+    check_snapshot_external,
 ];
 
 impl Issue {
@@ -1054,6 +1079,19 @@ mod tests {
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted.len(), 14, "RULE_CATALOG has duplicate rule names");
+    }
+
+    // T-330: CHECKS enrols exactly as many functions as RULE_CATALOG names, so
+    // adding a check_* without registering it in CHECKS (or vice versa) breaks
+    // the build. This links the two manual lists the analysis pass depends on,
+    // closing the "defined but never called" drift the #32 follow-up flagged.
+    #[test]
+    fn checks_count_matches_rule_catalog() {
+        assert_eq!(
+            CHECKS.len(),
+            RULE_CATALOG.len(),
+            "CHECKS and RULE_CATALOG drifted: a rule was added to one list but not the other"
+        );
     }
 
     // T-010: every WARNING_RULES entry is present in RULE_CATALOG, so a warning
