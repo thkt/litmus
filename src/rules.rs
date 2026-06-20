@@ -111,11 +111,35 @@ impl fmt::Display for Issue {
     }
 }
 
+// A test marked skip/todo is inert; skipped-test owns it.
+fn is_skipped(block: &TestBlock) -> bool {
+    matches!(
+        block.modifier,
+        Some(TestModifier::Skip | TestModifier::Todo)
+    )
+}
+
+// Every assertion in the block sits in the given context (and there is at
+// least one). The predicate shared by catch-only-assertion / conditional-
+// assertion and by weak-assertion's suppression guard, so firing and
+// suppression cannot drift apart.
+fn all_assertions_in(block: &TestBlock, context: AssertionContext) -> bool {
+    !block.assertions.is_empty() && block.assertions.iter().all(|a| a.context == context)
+}
+
 pub fn check_weak_assertions(blocks: &[TestBlock], file: &Path) -> Vec<Issue> {
     let mut issues = Vec::new();
     for block in blocks {
-        // empty-test takes priority over weak-assertion (AC-1)
-        if block.has_empty_body {
+        // A more-specific rule already owns these blocks; suppress the
+        // weak-assertion finding so one defect yields one (most-specific)
+        // finding. Each guard implies its owning rule actually fires.
+        if block.has_empty_body                                              // empty-test (AC-1)
+            || is_skipped(block)                                             // skipped-test
+            || (block.assertions.is_empty() && !block.catch_swallows.is_empty()) // catch-swallow
+            || all_assertions_in(block, AssertionContext::CatchBlock)        // catch-only-assertion
+            || all_assertions_in(block, AssertionContext::IfBranch)
+        // conditional-assertion
+        {
             continue;
         }
         if block.assertions.is_empty() || block.assertions.iter().all(|a| a.is_weak) {
@@ -247,10 +271,7 @@ pub fn check_empty_test(blocks: &[TestBlock], file: &Path) -> Vec<Issue> {
 pub fn check_skipped_test(blocks: &[TestBlock], file: &Path) -> Vec<Issue> {
     let mut issues = Vec::new();
     for block in blocks {
-        if matches!(
-            block.modifier,
-            Some(TestModifier::Skip | TestModifier::Todo)
-        ) {
+        if is_skipped(block) {
             let detail = match block.modifier {
                 Some(TestModifier::Skip) => "skip".to_owned(),
                 Some(TestModifier::Todo) => "todo".to_owned(),
@@ -308,12 +329,7 @@ pub fn check_catch_masks_assertion(blocks: &[TestBlock], file: &Path) -> Vec<Iss
 pub fn check_conditional_assertion(blocks: &[TestBlock], file: &Path) -> Vec<Issue> {
     let mut issues = Vec::new();
     for block in blocks {
-        if !block.assertions.is_empty()
-            && block
-                .assertions
-                .iter()
-                .all(|a| a.context == AssertionContext::IfBranch)
-        {
+        if all_assertions_in(block, AssertionContext::IfBranch) {
             issues.push(Issue::new(
                 "conditional-assertion",
                 file,
@@ -329,12 +345,7 @@ pub fn check_conditional_assertion(blocks: &[TestBlock], file: &Path) -> Vec<Iss
 pub fn check_catch_only_assertion(blocks: &[TestBlock], file: &Path) -> Vec<Issue> {
     let mut issues = Vec::new();
     for block in blocks {
-        if !block.assertions.is_empty()
-            && block
-                .assertions
-                .iter()
-                .all(|a| a.context == AssertionContext::CatchBlock)
-        {
+        if all_assertions_in(block, AssertionContext::CatchBlock) {
             issues.push(Issue::new(
                 "catch-only-assertion",
                 file,
@@ -452,6 +463,7 @@ pub fn check_snapshot_external(blocks: &[TestBlock], file: &Path) -> Vec<Issue> 
 mod tests {
     use super::*;
     use crate::parse::*;
+    use std::slice::from_ref;
 
     fn path() -> &'static Path {
         Path::new("test.ts")
@@ -1020,6 +1032,72 @@ mod tests {
         let blocks = vec![block(vec![], vec![])];
         let issues = check_catch_only_assertion(&blocks, path());
         assert_eq!(issues.len(), 0);
+    }
+
+    fn weak_assertion_with_context(context: AssertionContext) -> Assertion {
+        Assertion {
+            line: 2,
+            target: "x".into(),
+            target_kind: TargetKind::Identifier,
+            target_root: Some("x".into()),
+            matcher: "toBeTruthy".into(),
+            is_weak: true,
+            context,
+        }
+    }
+
+    // T-217: skipped test with a weak assertion → weak-assertion suppressed
+    // (skipped-test owns the inert test), skipped-test still fires
+    #[test]
+    fn weak_assertion_suppressed_for_skipped_test() {
+        let mut b = block(vec![weak_assertion("toBeTruthy")], vec![]);
+        b.modifier = Some(TestModifier::Skip);
+        assert_eq!(check_weak_assertions(from_ref(&b), path()).len(), 0);
+        assert_eq!(check_skipped_test(&[b], path()).len(), 1);
+    }
+
+    // T-218: no-assertion test whose catch swallows → weak-assertion suppressed
+    // (catch-swallow owns it), catch-swallow still fires
+    #[test]
+    fn weak_assertion_suppressed_for_catch_swallow() {
+        let mut b = block(vec![], vec![]);
+        b.catch_swallows = vec![5];
+        assert_eq!(check_weak_assertions(from_ref(&b), path()).len(), 0);
+        assert_eq!(check_catch_swallow(&[b], path()).len(), 1);
+    }
+
+    // T-219: all-weak assertions sit in the catch → weak-assertion suppressed
+    // (catch-only-assertion owns it), catch-only-assertion still fires
+    #[test]
+    fn weak_assertion_suppressed_for_catch_only() {
+        let b = block(
+            vec![weak_assertion_with_context(AssertionContext::CatchBlock)],
+            vec![],
+        );
+        assert_eq!(check_weak_assertions(from_ref(&b), path()).len(), 0);
+        assert_eq!(check_catch_only_assertion(&[b], path()).len(), 1);
+    }
+
+    // T-220: all-weak assertions sit in an if branch → weak-assertion suppressed
+    // (conditional-assertion owns it), conditional-assertion still fires
+    #[test]
+    fn weak_assertion_suppressed_for_conditional() {
+        let b = block(
+            vec![weak_assertion_with_context(AssertionContext::IfBranch)],
+            vec![],
+        );
+        assert_eq!(check_weak_assertions(from_ref(&b), path()).len(), 0);
+        assert_eq!(check_conditional_assertion(&[b], path()).len(), 1);
+    }
+
+    // T-221: a swallowing catch plus a separate weak assertion outside the catch
+    // → both fire (the weak assertion is not owned by catch-swallow)
+    #[test]
+    fn weak_and_catch_swallow_both_fire_when_assertion_outside_catch() {
+        let mut b = block(vec![weak_assertion("toBeTruthy")], vec![]);
+        b.catch_swallows = vec![5];
+        assert_eq!(check_weak_assertions(from_ref(&b), path()).len(), 1);
+        assert_eq!(check_catch_swallow(&[b], path()).len(), 1);
     }
 
     fn dummy_literal(value: &str, line: u32) -> DummyLiteral {
