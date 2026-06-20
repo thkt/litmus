@@ -1,0 +1,4 @@
+test("matches the rendered invoice structure", () => {
+  const invoice = render(order);
+  expect(invoice).toMatchSnapshot();
+});

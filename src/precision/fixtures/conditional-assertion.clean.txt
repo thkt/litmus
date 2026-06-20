@@ -1,0 +1,4 @@
+test("returns the computed value unconditionally", () => {
+  const result = compute();
+  expect(result.value).toBe(42);
+});

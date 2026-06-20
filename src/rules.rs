@@ -22,6 +22,29 @@ pub enum Severity {
 // derived from the rule name rather than stored on every Issue.
 const WARNING_RULES: &[&str] = &["dummy-data", "missing-act", "snapshot-external"];
 
+// Every rule name litmus can emit. The precision corpus gate requires a
+// fire+clean fixture pair for each entry, so a new rule must be added here to
+// be measured. This is a manual catalog, not a registry derived from
+// analyze_source: adding a rule to the analysis pass without adding it here is
+// NOT caught (litmus has no single rule registry yet — see #32 follow-up). It
+// guards fixture coverage and rule-name typos, not rule enrolment.
+pub const RULE_CATALOG: &[&str] = &[
+    "catch-masks-assertion",
+    "catch-only-assertion",
+    "catch-swallow",
+    "conditional-assertion",
+    "dummy-data",
+    "empty-test",
+    "missing-act",
+    "mock-only",
+    "mock-overuse",
+    "skipped-test",
+    "snapshot-external",
+    "tautological",
+    "test-name-quality",
+    "weak-assertion",
+];
+
 impl Issue {
     pub fn severity(&self) -> Severity {
         if WARNING_RULES.contains(&self.rule) {
@@ -1021,6 +1044,28 @@ mod tests {
     fn other_rule_severity_is_blocking() {
         let issues = check_weak_assertions(&[block(vec![], vec![])], path());
         assert_eq!(issues[0].severity(), Severity::Blocking);
+    }
+
+    // T-011: RULE_CATALOG lists 14 rule names with no duplicates.
+    #[test]
+    fn rule_catalog_has_fourteen_unique_rules() {
+        assert_eq!(RULE_CATALOG.len(), 14);
+        let mut sorted = RULE_CATALOG.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), 14, "RULE_CATALOG has duplicate rule names");
+    }
+
+    // T-010: every WARNING_RULES entry is present in RULE_CATALOG, so a warning
+    // rule cannot exist outside the catalog the precision corpus enumerates.
+    #[test]
+    fn warning_rules_are_subset_of_catalog() {
+        for rule in WARNING_RULES {
+            assert!(
+                RULE_CATALOG.contains(rule),
+                "warning rule {rule} missing from RULE_CATALOG"
+            );
+        }
     }
 
     // T-235: every rule listed in WARNING_RULES resolves to Warning, so a new

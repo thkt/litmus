@@ -1,0 +1,6 @@
+test("checks the result only when present", () => {
+  const result = compute();
+  if (result) {
+    expect(result.value).toBe(42);
+  }
+});

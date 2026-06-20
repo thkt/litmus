@@ -1,0 +1,5 @@
+test("records that the logger was invoked", () => {
+  const log = vi.fn();
+  record(log);
+  expect(log).toHaveBeenCalledOnce();
+});

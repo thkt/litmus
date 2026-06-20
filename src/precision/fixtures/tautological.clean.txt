@@ -1,0 +1,4 @@
+test("returns the active flag from state", () => {
+  const state = reduce(initial, action);
+  expect(state.active).toBe(true);
+});

@@ -1,0 +1,4 @@
+test("returns a truthy user object", () => {
+  const user = buildUser();
+  expect(user).toBeTruthy();
+});

@@ -1,0 +1,4 @@
+test("returns the computed total", () => {
+  const result = compute();
+  expect(result).toBe(42);
+});

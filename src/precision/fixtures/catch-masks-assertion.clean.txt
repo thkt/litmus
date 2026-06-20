@@ -1,0 +1,3 @@
+test("throws when the user payload is malformed", () => {
+  expect(() => parseUser("")).toThrow();
+});

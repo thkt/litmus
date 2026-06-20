@@ -1,0 +1,7 @@
+test("computes total with mocked collaborators", () => {
+  const log = vi.fn();
+  const fetch = vi.fn();
+  const notify = vi.fn();
+  const result = compute(log, fetch, notify);
+  expect(result).toBe(42);
+});

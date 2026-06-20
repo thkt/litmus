@@ -1,0 +1,4 @@
+test("returns the active user session", () => {
+  const session = loadSession();
+  expect(session.active).toBe(true);
+});
