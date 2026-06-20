@@ -6,6 +6,7 @@ use oxc_ast::ast::{
 };
 use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType};
+use std::mem;
 use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -258,21 +259,16 @@ fn extract_test_block(call: &CallExpression<'_>, src: &Source) -> Option<TestBlo
     let has_act = body_has_act(&body.statements);
     let bound_names = body_bound_names(&body.statements);
 
-    let mut assertions = Vec::new();
-    let mut mock_calls = Vec::new();
-    let mut catch_swallows = Vec::new();
-    let mut catch_masks = Vec::new();
-    let mut dummy_literals = Vec::new();
-    scan_body(
-        &body.statements,
-        src,
-        &mut assertions,
-        &mut mock_calls,
-        &mut catch_swallows,
-        &mut catch_masks,
-        &mut dummy_literals,
-        AssertionContext::TopLevel,
-    );
+    let mut collector = Collector::new(src);
+    collector.scan_body(&body.statements, AssertionContext::TopLevel);
+    let Collector {
+        assertions,
+        mocks: mock_calls,
+        catch_swallows,
+        catch_masks,
+        dummies: dummy_literals,
+        ..
+    } = collector;
 
     Some(TestBlock {
         name,
@@ -304,187 +300,154 @@ fn callback_body<'a>(args: &'a [Argument<'a>]) -> Option<&'a FunctionBody<'a>> {
     }
 }
 
-// Output sinks (assertions / mocks / catch_swallows / catch_masks / dummies)
-// are threaded as explicit parameters, matching the established style; the
-// count sits one over clippy's default after adding catch_masks.
-#[allow(clippy::too_many_arguments)]
-fn scan_body(
-    stmts: &[Statement<'_>],
-    src: &Source,
-    assertions: &mut Vec<Assertion>,
-    mocks: &mut Vec<MockCall>,
-    catch_swallows: &mut Vec<u32>,
-    catch_masks: &mut Vec<u32>,
-    dummies: &mut Vec<DummyLiteral>,
-    context: AssertionContext,
-) {
-    for stmt in stmts {
-        scan_statement(
-            stmt,
-            src,
-            assertions,
-            mocks,
-            catch_swallows,
-            catch_masks,
-            dummies,
-            &context,
-        );
-    }
+// Gathers the five output sinks (assertions / mocks / catch_swallows /
+// catch_masks / dummies) for one test block so the scan walk threads a single
+// `&mut self` instead of one parameter per sink. Adding a sink is now a field,
+// not a signature change across every recursive arm.
+struct Collector<'s, 'a> {
+    src: &'s Source<'a>,
+    assertions: Vec<Assertion>,
+    mocks: Vec<MockCall>,
+    catch_swallows: Vec<u32>,
+    catch_masks: Vec<u32>,
+    dummies: Vec<DummyLiteral>,
 }
 
-#[allow(clippy::too_many_arguments)]
-fn scan_statement(
-    stmt: &Statement<'_>,
-    src: &Source,
-    assertions: &mut Vec<Assertion>,
-    mocks: &mut Vec<MockCall>,
-    catch_swallows: &mut Vec<u32>,
-    catch_masks: &mut Vec<u32>,
-    dummies: &mut Vec<DummyLiteral>,
-    context: &AssertionContext,
-) {
-    match stmt {
-        Statement::ExpressionStatement(es) => {
-            scan_expr(&es.expression, src, assertions, mocks, context);
-            collect_dummies_expr(&es.expression, src, dummies);
+impl<'s, 'a> Collector<'s, 'a> {
+    fn new(src: &'s Source<'a>) -> Self {
+        Self {
+            src,
+            assertions: Vec::new(),
+            mocks: Vec::new(),
+            catch_swallows: Vec::new(),
+            catch_masks: Vec::new(),
+            dummies: Vec::new(),
         }
-        Statement::VariableDeclaration(vd) => {
-            for decl in &vd.declarations {
-                if let Some(init) = &decl.init {
-                    scan_expr(init, src, assertions, mocks, context);
-                    collect_dummies_expr(init, src, dummies);
+    }
+
+    fn scan_body(&mut self, stmts: &[Statement<'_>], context: AssertionContext) {
+        for stmt in stmts {
+            self.scan_statement(stmt, &context);
+        }
+    }
+
+    fn scan_statement(&mut self, stmt: &Statement<'_>, context: &AssertionContext) {
+        match stmt {
+            Statement::ExpressionStatement(es) => {
+                scan_expr(
+                    &es.expression,
+                    self.src,
+                    &mut self.assertions,
+                    &mut self.mocks,
+                    context,
+                );
+                collect_dummies_expr(&es.expression, self.src, &mut self.dummies);
+            }
+            Statement::VariableDeclaration(vd) => {
+                for decl in &vd.declarations {
+                    if let Some(init) = &decl.init {
+                        scan_expr(
+                            init,
+                            self.src,
+                            &mut self.assertions,
+                            &mut self.mocks,
+                            context,
+                        );
+                        collect_dummies_expr(init, self.src, &mut self.dummies);
+                    }
                 }
             }
+            Statement::ReturnStatement(rs) => {
+                if let Some(arg) = &rs.argument {
+                    scan_expr(
+                        arg,
+                        self.src,
+                        &mut self.assertions,
+                        &mut self.mocks,
+                        context,
+                    );
+                    collect_dummies_expr(arg, self.src, &mut self.dummies);
+                }
+            }
+            Statement::BlockStatement(bs) => {
+                self.scan_body(&bs.body, *context);
+            }
+            Statement::IfStatement(if_stmt) => {
+                self.scan_statement(&if_stmt.consequent, &AssertionContext::IfBranch);
+                if let Some(alt) = &if_stmt.alternate {
+                    self.scan_statement(alt, &AssertionContext::IfBranch);
+                }
+            }
+            Statement::ForStatement(for_stmt) => {
+                self.scan_statement(&for_stmt.body, context);
+            }
+            Statement::ForInStatement(for_in) => {
+                self.scan_statement(&for_in.body, context);
+            }
+            Statement::ForOfStatement(for_of) => {
+                self.scan_statement(&for_of.body, context);
+            }
+            Statement::WhileStatement(while_stmt) => {
+                self.scan_statement(&while_stmt.body, context);
+            }
+            Statement::DoWhileStatement(do_while) => {
+                self.scan_statement(&do_while.body, context);
+            }
+            Statement::TryStatement(try_stmt) => {
+                self.scan_try_statement(try_stmt, context);
+            }
+            Statement::SwitchStatement(switch_stmt) => {
+                for case in &switch_stmt.cases {
+                    self.scan_body(&case.consequent, *context);
+                }
+            }
+            _ => {}
         }
-        Statement::ReturnStatement(rs) => {
-            if let Some(arg) = &rs.argument {
-                scan_expr(arg, src, assertions, mocks, context);
-                collect_dummies_expr(arg, src, dummies);
+    }
+
+    fn scan_try_statement(&mut self, try_stmt: &TryStatement<'_>, context: &AssertionContext) {
+        // catch-masks judges only top-level try assertions, mirroring the
+        // top-level rethrow check on the catch. An assertion inside a nested
+        // try-catch is shielded by that inner catch and never reaches this
+        // catch, so a delta over the body-wide flattened vec (which scan_body
+        // bubbles inner assertions into) would misfire on the outer catch.
+        let try_has_assertion = try_block_has_top_level_assertion(&try_stmt.block.body, self.src);
+        self.scan_body(&try_stmt.block.body, AssertionContext::TryBlock);
+
+        if let Some(handler) = &try_stmt.handler {
+            if handler.body.body.is_empty() {
+                self.catch_swallows.push(self.src.line(handler.span.start));
+            } else {
+                // Divert assertions to a catch-local vec while keeping mocks /
+                // swallows / masks / dummies shared: the swallow / mask checks
+                // below read only the catch's own assertions. mem::take leaves
+                // self.assertions empty to collect them, then mem::replace
+                // restores the shared vec and hands back the catch-local one.
+                let saved = mem::take(&mut self.assertions);
+                for catch_stmt in &handler.body.body {
+                    self.scan_statement(catch_stmt, &AssertionContext::CatchBlock);
+                }
+                let catch_assertions = mem::replace(&mut self.assertions, saved);
+                // A rethrow anywhere in the catch — including nested in if / for
+                // / block / switch / try — lets the try AssertionError
+                // propagate, so the catch neither swallows nor masks it (#27).
+                let catch_rethrows = body_contains_throw(&handler.body.body);
+                if catch_assertions.is_empty() && !catch_rethrows {
+                    self.catch_swallows.push(self.src.line(handler.span.start));
+                }
+                // catch-masks: try asserts, catch asserts, catch does not
+                // rethrow. The try AssertionError is swallowed and replaced by a
+                // passing catch assertion (js-testing-best-practices §1.10).
+                if try_has_assertion && !catch_assertions.is_empty() && !catch_rethrows {
+                    self.catch_masks.push(self.src.line(handler.span.start));
+                }
+                self.assertions.extend(catch_assertions);
             }
         }
-        Statement::BlockStatement(bs) => {
-            scan_body(
-                &bs.body,
-                src,
-                assertions,
-                mocks,
-                catch_swallows,
-                catch_masks,
-                dummies,
-                *context,
-            );
+
+        if let Some(finalizer) = &try_stmt.finalizer {
+            self.scan_body(&finalizer.body, *context);
         }
-        Statement::IfStatement(if_stmt) => {
-            scan_statement(
-                &if_stmt.consequent,
-                src,
-                assertions,
-                mocks,
-                catch_swallows,
-                catch_masks,
-                dummies,
-                &AssertionContext::IfBranch,
-            );
-            if let Some(alt) = &if_stmt.alternate {
-                scan_statement(
-                    alt,
-                    src,
-                    assertions,
-                    mocks,
-                    catch_swallows,
-                    catch_masks,
-                    dummies,
-                    &AssertionContext::IfBranch,
-                );
-            }
-        }
-        Statement::ForStatement(for_stmt) => {
-            scan_statement(
-                &for_stmt.body,
-                src,
-                assertions,
-                mocks,
-                catch_swallows,
-                catch_masks,
-                dummies,
-                context,
-            );
-        }
-        Statement::ForInStatement(for_in) => {
-            scan_statement(
-                &for_in.body,
-                src,
-                assertions,
-                mocks,
-                catch_swallows,
-                catch_masks,
-                dummies,
-                context,
-            );
-        }
-        Statement::ForOfStatement(for_of) => {
-            scan_statement(
-                &for_of.body,
-                src,
-                assertions,
-                mocks,
-                catch_swallows,
-                catch_masks,
-                dummies,
-                context,
-            );
-        }
-        Statement::WhileStatement(while_stmt) => {
-            scan_statement(
-                &while_stmt.body,
-                src,
-                assertions,
-                mocks,
-                catch_swallows,
-                catch_masks,
-                dummies,
-                context,
-            );
-        }
-        Statement::DoWhileStatement(do_while) => {
-            scan_statement(
-                &do_while.body,
-                src,
-                assertions,
-                mocks,
-                catch_swallows,
-                catch_masks,
-                dummies,
-                context,
-            );
-        }
-        Statement::TryStatement(try_stmt) => {
-            scan_try_statement(
-                try_stmt,
-                src,
-                assertions,
-                mocks,
-                catch_swallows,
-                catch_masks,
-                dummies,
-                context,
-            );
-        }
-        Statement::SwitchStatement(switch_stmt) => {
-            for case in &switch_stmt.cases {
-                scan_body(
-                    &case.consequent,
-                    src,
-                    assertions,
-                    mocks,
-                    catch_swallows,
-                    catch_masks,
-                    dummies,
-                    *context,
-                );
-            }
-        }
-        _ => {}
     }
 }
 
@@ -508,82 +471,6 @@ fn try_block_has_top_level_assertion(body: &[Statement<'_>], src: &Source) -> bo
         );
         !probe.is_empty()
     })
-}
-
-#[allow(clippy::too_many_arguments)]
-fn scan_try_statement(
-    try_stmt: &TryStatement<'_>,
-    src: &Source,
-    assertions: &mut Vec<Assertion>,
-    mocks: &mut Vec<MockCall>,
-    catch_swallows: &mut Vec<u32>,
-    catch_masks: &mut Vec<u32>,
-    dummies: &mut Vec<DummyLiteral>,
-    context: &AssertionContext,
-) {
-    // catch-masks judges only top-level try assertions, mirroring the top-level
-    // rethrow check on the catch. An assertion inside a nested try-catch is
-    // shielded by that inner catch and never reaches this catch, so a delta over
-    // the body-wide flattened vec (which scan_body bubbles inner assertions into)
-    // would misfire on the outer catch.
-    let try_has_assertion = try_block_has_top_level_assertion(&try_stmt.block.body, src);
-    scan_body(
-        &try_stmt.block.body,
-        src,
-        assertions,
-        mocks,
-        catch_swallows,
-        catch_masks,
-        dummies,
-        AssertionContext::TryBlock,
-    );
-
-    if let Some(handler) = &try_stmt.handler {
-        if handler.body.body.is_empty() {
-            catch_swallows.push(src.line(handler.span.start));
-        } else {
-            let mut catch_assertions = Vec::new();
-            for catch_stmt in &handler.body.body {
-                scan_statement(
-                    catch_stmt,
-                    src,
-                    &mut catch_assertions,
-                    mocks,
-                    catch_swallows,
-                    catch_masks,
-                    dummies,
-                    &AssertionContext::CatchBlock,
-                );
-            }
-            // A rethrow anywhere in the catch — including nested in if / for /
-            // block / switch / try — lets the try AssertionError propagate, so
-            // the catch neither swallows nor masks it (#27).
-            let catch_rethrows = body_contains_throw(&handler.body.body);
-            if catch_assertions.is_empty() && !catch_rethrows {
-                catch_swallows.push(src.line(handler.span.start));
-            }
-            // catch-masks: try asserts, catch asserts, catch does not rethrow.
-            // The try AssertionError is swallowed and replaced by a passing
-            // catch assertion (js-testing-best-practices §1.10).
-            if try_has_assertion && !catch_assertions.is_empty() && !catch_rethrows {
-                catch_masks.push(src.line(handler.span.start));
-            }
-            assertions.extend(catch_assertions);
-        }
-    }
-
-    if let Some(finalizer) = &try_stmt.finalizer {
-        scan_body(
-            &finalizer.body,
-            src,
-            assertions,
-            mocks,
-            catch_swallows,
-            catch_masks,
-            dummies,
-            *context,
-        );
-    }
 }
 
 // Whether any statement rethrows. Walks control-flow nesting (block / if / for
