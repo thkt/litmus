@@ -765,6 +765,19 @@ fn scan_expr(
             Expression::ParenthesizedExpression(paren) => {
                 stack.push((&paren.expression, context));
             }
+            Expression::SequenceExpression(seq) => {
+                // Every element of `(a, b, c)` evaluates unconditionally, so each
+                // keeps the parent context. Push in reverse for source order (#31).
+                for sub in seq.expressions.iter().rev() {
+                    stack.push((sub, context));
+                }
+            }
+            // Transparent type wrappers around an assertion call, e.g.
+            // `(expect(x).toBe(1) as any)`; descend to the inner call (#31).
+            Expression::TSAsExpression(e) => stack.push((&e.expression, context)),
+            Expression::TSSatisfiesExpression(e) => stack.push((&e.expression, context)),
+            Expression::TSNonNullExpression(e) => stack.push((&e.expression, context)),
+            Expression::TSTypeAssertion(e) => stack.push((&e.expression, context)),
             _ => {}
         }
     }
@@ -818,6 +831,14 @@ fn find_expect_target(
             }
         }
         Expression::StaticMemberExpression(member) => find_expect_target(&member.object, src),
+        // Transparent wrappers between `.matcher` and the `expect(...)` call
+        // (mirrors expr_root_ident / expr_has_act): `(expect(v)).toBe`,
+        // `(expect(v) as T).toBe`, `expect(v)!.toBe` all assert on expect (#31).
+        Expression::ParenthesizedExpression(p) => find_expect_target(&p.expression, src),
+        Expression::TSAsExpression(e) => find_expect_target(&e.expression, src),
+        Expression::TSSatisfiesExpression(e) => find_expect_target(&e.expression, src),
+        Expression::TSNonNullExpression(e) => find_expect_target(&e.expression, src),
+        Expression::TSTypeAssertion(e) => find_expect_target(&e.expression, src),
         _ => None,
     }
 }
@@ -833,6 +854,8 @@ fn expr_root_ident(expr: &Expression<'_>) -> Option<String> {
         Expression::ParenthesizedExpression(p) => expr_root_ident(&p.expression),
         Expression::TSNonNullExpression(e) => expr_root_ident(&e.expression),
         Expression::TSAsExpression(e) => expr_root_ident(&e.expression),
+        Expression::TSSatisfiesExpression(e) => expr_root_ident(&e.expression),
+        Expression::TSTypeAssertion(e) => expr_root_ident(&e.expression),
         _ => None,
     }
 }
@@ -1768,6 +1791,57 @@ describe("outer", () => {
     fn call_argument_not_traversed() {
         let blocks = parse(r#"test("x", () => { setTimeout(() => expect(x).toBe(1)) })"#);
         assert_eq!(blocks[0].assertions.len(), 0);
+    }
+
+    // T-136: assertion in a sequence expression is detected, unconditionally (#31)
+    #[test]
+    fn sequence_expression_assertion_detected() {
+        let blocks = parse(r#"test("x", () => { (doThing(), expect(v).toBe(1)) })"#);
+        assert_eq!(blocks[0].assertions.len(), 1);
+        assert_eq!(blocks[0].assertions[0].context, AssertionContext::TopLevel);
+    }
+
+    // T-137: expect base wrapped in `as` cast is detected (#31)
+    #[test]
+    fn ts_as_wrapped_expect_detected() {
+        let blocks = parse(r#"test("x", () => { (expect(v) as any).toBe(1) })"#);
+        assert_eq!(blocks[0].assertions.len(), 1);
+    }
+
+    // T-138: expect base with non-null assertion is detected (#31)
+    #[test]
+    fn ts_non_null_wrapped_expect_detected() {
+        let blocks = parse(r#"test("x", () => { expect(v)!.toBe(1) })"#);
+        assert_eq!(blocks[0].assertions.len(), 1);
+    }
+
+    // T-139: parenthesized expect base is detected (#31)
+    #[test]
+    fn parenthesized_expect_base_detected() {
+        let blocks = parse(r#"test("x", () => { (expect(v)).toBe(1) })"#);
+        assert_eq!(blocks[0].assertions.len(), 1);
+    }
+
+    // T-140: expect base wrapped in `satisfies` is detected (#31)
+    #[test]
+    fn ts_satisfies_wrapped_expect_detected() {
+        let blocks = parse(r#"test("x", () => { (expect(v) satisfies unknown).toBe(1) })"#);
+        assert_eq!(blocks[0].assertions.len(), 1);
+    }
+
+    // T-142: a `satisfies`/type-asserted expect argument still resolves its root,
+    // so missing-act sees the target (expr_root_ident mirrors find_expect_target, #31)
+    #[test]
+    fn ts_wrapped_expect_argument_root_resolved() {
+        let blocks = parse(r#"test("x", () => { expect(v satisfies unknown).toBe(1) })"#);
+        assert_eq!(blocks[0].assertions[0].target_root.as_deref(), Some("v"));
+    }
+
+    // T-141: a whole assertion call wrapped in a cast is detected (#31)
+    #[test]
+    fn ts_as_wrapped_assertion_call_detected() {
+        let blocks = parse(r#"test("x", () => { (expect(v).toBe(1) as any) })"#);
+        assert_eq!(blocks[0].assertions.len(), 1);
     }
 
     // T-112: catch with throw e → no catch_swallow
