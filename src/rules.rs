@@ -71,6 +71,20 @@ pub const CHECKS: &[CheckFn] = &[
 ];
 
 impl Issue {
+    // Build an Issue, re-owning the borrowed file path and test name internally
+    // so the 14 check_* sites stop repeating `file.to_path_buf()` /
+    // `block.name.clone()`. Predicates and per-rule line attribution stay at the
+    // call site; only the literal's field plumbing is centralized here (#54).
+    fn new(rule: &'static str, file: &Path, line: u32, test_name: &str, detail: String) -> Self {
+        Self {
+            rule,
+            file: file.to_path_buf(),
+            line,
+            test_name: test_name.to_owned(),
+            detail,
+        }
+    }
+
     pub fn severity(&self) -> Severity {
         if WARNING_RULES.contains(&self.rule) {
             Severity::Warning
@@ -105,25 +119,26 @@ pub fn check_weak_assertions(blocks: &[TestBlock], file: &Path) -> Vec<Issue> {
             continue;
         }
         if block.assertions.is_empty() || block.assertions.iter().all(|a| a.is_weak) {
-            issues.push(Issue {
-                rule: "weak-assertion",
-                file: file.to_path_buf(),
-                line: block.line,
-                test_name: block.name.clone(),
-                detail: if block.assertions.is_empty() {
-                    "no assertions".to_owned()
-                } else {
-                    format!(
-                        "only weak: {}",
-                        block
-                            .assertions
-                            .iter()
-                            .map(|a| a.matcher.as_str())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    )
-                },
-            });
+            let detail = if block.assertions.is_empty() {
+                "no assertions".to_owned()
+            } else {
+                format!(
+                    "only weak: {}",
+                    block
+                        .assertions
+                        .iter()
+                        .map(|a| a.matcher.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            };
+            issues.push(Issue::new(
+                "weak-assertion",
+                file,
+                block.line,
+                &block.name,
+                detail,
+            ));
         }
     }
     issues
@@ -135,13 +150,13 @@ pub fn check_mock_overuse(blocks: &[TestBlock], file: &Path) -> Vec<Issue> {
         let mock_count = block.mock_calls.len();
         let assertion_count = block.assertions.len();
         if mock_count > assertion_count {
-            issues.push(Issue {
-                rule: "mock-overuse",
-                file: file.to_path_buf(),
-                line: block.line,
-                test_name: block.name.clone(),
-                detail: format!("mocks: {mock_count}, assertions: {assertion_count}"),
-            });
+            issues.push(Issue::new(
+                "mock-overuse",
+                file,
+                block.line,
+                &block.name,
+                format!("mocks: {mock_count}, assertions: {assertion_count}"),
+            ));
         }
     }
     issues
@@ -152,13 +167,13 @@ pub fn check_tautological(blocks: &[TestBlock], file: &Path) -> Vec<Issue> {
     for block in blocks {
         for assertion in &block.assertions {
             if assertion.target_kind == TargetKind::Literal {
-                issues.push(Issue {
-                    rule: "tautological",
-                    file: file.to_path_buf(),
-                    line: assertion.line,
-                    test_name: block.name.clone(),
-                    detail: format!("target: {}", assertion.target),
-                });
+                issues.push(Issue::new(
+                    "tautological",
+                    file,
+                    assertion.line,
+                    &block.name,
+                    format!("target: {}", assertion.target),
+                ));
             }
         }
     }
@@ -201,13 +216,13 @@ pub fn check_mock_only(blocks: &[TestBlock], file: &Path) -> Vec<Issue> {
                 .iter()
                 .map(|a| a.matcher.as_str())
                 .collect();
-            issues.push(Issue {
-                rule: "mock-only",
-                file: file.to_path_buf(),
-                line: block.line,
-                test_name: block.name.clone(),
-                detail: format!("matchers: {}", matchers.join(", ")),
-            });
+            issues.push(Issue::new(
+                "mock-only",
+                file,
+                block.line,
+                &block.name,
+                format!("matchers: {}", matchers.join(", ")),
+            ));
         }
     }
     issues
@@ -217,13 +232,13 @@ pub fn check_empty_test(blocks: &[TestBlock], file: &Path) -> Vec<Issue> {
     let mut issues = Vec::new();
     for block in blocks {
         if block.has_empty_body {
-            issues.push(Issue {
-                rule: "empty-test",
-                file: file.to_path_buf(),
-                line: block.line,
-                test_name: block.name.clone(),
-                detail: String::new(),
-            });
+            issues.push(Issue::new(
+                "empty-test",
+                file,
+                block.line,
+                &block.name,
+                String::new(),
+            ));
         }
     }
     issues
@@ -236,17 +251,18 @@ pub fn check_skipped_test(blocks: &[TestBlock], file: &Path) -> Vec<Issue> {
             block.modifier,
             Some(TestModifier::Skip | TestModifier::Todo)
         ) {
-            issues.push(Issue {
-                rule: "skipped-test",
-                file: file.to_path_buf(),
-                line: block.line,
-                test_name: block.name.clone(),
-                detail: match block.modifier {
-                    Some(TestModifier::Skip) => "skip".to_owned(),
-                    Some(TestModifier::Todo) => "todo".to_owned(),
-                    _ => String::new(),
-                },
-            });
+            let detail = match block.modifier {
+                Some(TestModifier::Skip) => "skip".to_owned(),
+                Some(TestModifier::Todo) => "todo".to_owned(),
+                _ => String::new(),
+            };
+            issues.push(Issue::new(
+                "skipped-test",
+                file,
+                block.line,
+                &block.name,
+                detail,
+            ));
         }
     }
     issues
@@ -256,13 +272,13 @@ pub fn check_catch_swallow(blocks: &[TestBlock], file: &Path) -> Vec<Issue> {
     let mut issues = Vec::new();
     for block in blocks {
         for &catch_line in &block.catch_swallows {
-            issues.push(Issue {
-                rule: "catch-swallow",
-                file: file.to_path_buf(),
-                line: catch_line,
-                test_name: block.name.clone(),
-                detail: "catch block has no assertions and no throw".to_owned(),
-            });
+            issues.push(Issue::new(
+                "catch-swallow",
+                file,
+                catch_line,
+                &block.name,
+                "catch block has no assertions and no throw".to_owned(),
+            ));
         }
     }
     issues
@@ -277,14 +293,13 @@ pub fn check_catch_masks_assertion(blocks: &[TestBlock], file: &Path) -> Vec<Iss
     let mut issues = Vec::new();
     for block in blocks {
         for &catch_line in &block.catch_masks {
-            issues.push(Issue {
-                rule: "catch-masks-assertion",
-                file: file.to_path_buf(),
-                line: catch_line,
-                test_name: block.name.clone(),
-                detail: "try assertion swallowed by catch; use .toThrow()/.rejects.toThrow()"
-                    .to_owned(),
-            });
+            issues.push(Issue::new(
+                "catch-masks-assertion",
+                file,
+                catch_line,
+                &block.name,
+                "try assertion swallowed by catch; use .toThrow()/.rejects.toThrow()".to_owned(),
+            ));
         }
     }
     issues
@@ -299,13 +314,13 @@ pub fn check_conditional_assertion(blocks: &[TestBlock], file: &Path) -> Vec<Iss
                 .iter()
                 .all(|a| a.context == AssertionContext::IfBranch)
         {
-            issues.push(Issue {
-                rule: "conditional-assertion",
-                file: file.to_path_buf(),
-                line: block.line,
-                test_name: block.name.clone(),
-                detail: format!("all {} assertions inside if", block.assertions.len()),
-            });
+            issues.push(Issue::new(
+                "conditional-assertion",
+                file,
+                block.line,
+                &block.name,
+                format!("all {} assertions inside if", block.assertions.len()),
+            ));
         }
     }
     issues
@@ -320,13 +335,13 @@ pub fn check_catch_only_assertion(blocks: &[TestBlock], file: &Path) -> Vec<Issu
                 .iter()
                 .all(|a| a.context == AssertionContext::CatchBlock)
         {
-            issues.push(Issue {
-                rule: "catch-only-assertion",
-                file: file.to_path_buf(),
-                line: block.line,
-                test_name: block.name.clone(),
-                detail: format!("all {} assertions inside catch", block.assertions.len()),
-            });
+            issues.push(Issue::new(
+                "catch-only-assertion",
+                file,
+                block.line,
+                &block.name,
+                format!("all {} assertions inside catch", block.assertions.len()),
+            ));
         }
     }
     issues
@@ -337,13 +352,13 @@ pub fn check_test_name(blocks: &[TestBlock], file: &Path) -> Vec<Issue> {
     for block in blocks {
         let word_count = block.name.split_whitespace().count();
         if word_count <= 2 {
-            issues.push(Issue {
-                rule: "test-name-quality",
-                file: file.to_path_buf(),
-                line: block.line,
-                test_name: block.name.clone(),
-                detail: format!("words: {word_count}"),
-            });
+            issues.push(Issue::new(
+                "test-name-quality",
+                file,
+                block.line,
+                &block.name,
+                format!("words: {word_count}"),
+            ));
         }
     }
     issues
@@ -353,13 +368,13 @@ pub fn check_dummy_data(blocks: &[TestBlock], file: &Path) -> Vec<Issue> {
     let mut issues = Vec::new();
     for block in blocks {
         for dummy in &block.dummy_literals {
-            issues.push(Issue {
-                rule: "dummy-data",
-                file: file.to_path_buf(),
-                line: dummy.line,
-                test_name: block.name.clone(),
-                detail: format!("dummy value: {}", dummy.value),
-            });
+            issues.push(Issue::new(
+                "dummy-data",
+                file,
+                dummy.line,
+                &block.name,
+                format!("dummy value: {}", dummy.value),
+            ));
         }
     }
     issues
@@ -392,13 +407,13 @@ pub fn check_missing_act(blocks: &[TestBlock], file: &Path) -> Vec<Issue> {
                     .is_some_and(|root| block.bound_names.iter().any(|n| n == root))
         });
         if asserts_arranged {
-            issues.push(Issue {
-                rule: "missing-act",
-                file: file.to_path_buf(),
-                line: block.line,
-                test_name: block.name.clone(),
-                detail: "assertions present but no Act (SUT call)".to_owned(),
-            });
+            issues.push(Issue::new(
+                "missing-act",
+                file,
+                block.line,
+                &block.name,
+                "assertions present but no Act (SUT call)".to_owned(),
+            ));
         }
     }
     issues
@@ -420,13 +435,13 @@ pub fn check_snapshot_external(blocks: &[TestBlock], file: &Path) -> Vec<Issue> 
     for block in blocks {
         for assertion in &block.assertions {
             if SNAPSHOT_MATCHERS.contains(&assertion.matcher.as_str()) {
-                issues.push(Issue {
-                    rule: "snapshot-external",
-                    file: file.to_path_buf(),
-                    line: assertion.line,
-                    test_name: block.name.clone(),
-                    detail: format!("matcher: {}", assertion.matcher),
-                });
+                issues.push(Issue::new(
+                    "snapshot-external",
+                    file,
+                    assertion.line,
+                    &block.name,
+                    format!("matcher: {}", assertion.matcher),
+                ));
             }
         }
     }
