@@ -562,9 +562,11 @@ mod tests {
     // breaking the precedence.
     #[test]
     fn worker_code_classifier_tracks_exit_constants() {
-        assert!(EXIT_SUCCESS < EXIT_WARNING);
-        assert!(EXIT_WARNING < EXIT_BLOCKING);
-        assert!(EXIT_BLOCKING < EXIT_SOFTWARE);
+        const {
+            assert!(EXIT_SUCCESS < EXIT_WARNING);
+            assert!(EXIT_WARNING < EXIT_BLOCKING);
+            assert!(EXIT_BLOCKING < EXIT_SOFTWARE);
+        }
         for code in [EXIT_SUCCESS, EXIT_WARNING, EXIT_BLOCKING] {
             match classify_worker_code(Some(i32::from(code))) {
                 WorkerOutcome::Code(c) => assert_eq!(c, code),
