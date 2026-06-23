@@ -250,11 +250,13 @@ fn every_sample_scans_under_budget() {
 // (the prior 10_000us was ~150x the measurement).
 #[test]
 fn latency_budget_catches_two_digit_regression() {
-    assert!(
-        LATENCY_BUDGET_US <= OBSERVED_SLOWEST_US * 10,
-        "budget {LATENCY_BUDGET_US}us exceeds 10x the observed {OBSERVED_SLOWEST_US}us \
-         slowest median; a 2-digit latency regression would pass undetected"
-    );
+    const {
+        assert!(
+            LATENCY_BUDGET_US <= OBSERVED_SLOWEST_US * 10,
+            "budget exceeds 10x the observed slowest median; a 2-digit latency \
+             regression would pass undetected"
+        );
+    }
 }
 
 // T-025: prints the precision corpus confusion matrix and derived precision /
