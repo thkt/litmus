@@ -365,17 +365,40 @@ pub fn check_catch_only_assertion(blocks: &[TestBlock], file: &Path) -> Vec<Issu
     issues
 }
 
+// CJK scripts (Han, Hiragana, Katakana) write words without spaces, so
+// split_whitespace cannot measure them — a fully descriptive Japanese name
+// collapses to one "word". Detect CJK to switch the vagueness metric below.
+fn is_cjk(c: char) -> bool {
+    matches!(c,
+        '\u{3040}'..='\u{309F}'   // Hiragana
+        | '\u{30A0}'..='\u{30FF}' // Katakana
+        | '\u{3400}'..='\u{4DBF}' // CJK Unified Ideographs Extension A
+        | '\u{4E00}'..='\u{9FFF}' // CJK Unified Ideographs
+    )
+}
+
 pub fn check_test_name(blocks: &[TestBlock], file: &Path) -> Vec<Issue> {
     let mut issues = Vec::new();
     for block in blocks {
-        let word_count = block.name.split_whitespace().count();
-        if word_count <= 2 {
+        // CJK names rarely contain spaces, so the word count collapses to 1 and
+        // flagged every Japanese name (issue #78). For CJK, switch to a length
+        // cutoff (<= 5 non-space chars) — a coarse proxy for vagueness, not a
+        // measure of it. Non-CJK keeps the word count, which catches phrases the
+        // char count would miss (English "should work": vague at 2 words, 11 chars).
+        let (metric, count, too_short) = if block.name.chars().any(is_cjk) {
+            let chars = block.name.chars().filter(|c| !c.is_whitespace()).count();
+            ("chars", chars, chars <= 5)
+        } else {
+            let words = block.name.split_whitespace().count();
+            ("words", words, words <= 2)
+        };
+        if too_short {
             issues.push(Issue::new(
                 "test-name-quality",
                 file,
                 block.line,
                 &block.name,
-                format!("words: {word_count}"),
+                format!("{metric}: {count}"),
             ));
         }
     }
@@ -829,6 +852,49 @@ mod tests {
         let issues = check_test_name(&blocks, path());
         assert_eq!(issues.len(), 1);
         assert!(issues[0].detail.contains("words: 0"));
+    }
+
+    // CJK: a descriptive Japanese name has no internal whitespace, so it must be
+    // measured by characters, not words, and must pass.
+    #[test]
+    fn test_name_japanese_descriptive_passes() {
+        let blocks = vec![named_block("プロンプト削除で不正なUUID形式は400を返すこと")];
+        let issues = check_test_name(&blocks, path());
+        assert_eq!(issues.len(), 0);
+    }
+
+    // CJK: a vague Japanese name (2 chars) → issue, reported by chars.
+    #[test]
+    fn test_name_japanese_vague_detected() {
+        let blocks = vec![named_block("削除")];
+        let issues = check_test_name(&blocks, path());
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].detail.contains("chars: 2"));
+    }
+
+    // CJK: 5-char boundary → issue (threshold is <= 5).
+    #[test]
+    fn test_name_japanese_five_chars_detected() {
+        let blocks = vec![named_block("削除テスト")];
+        let issues = check_test_name(&blocks, path());
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].detail.contains("chars: 5"));
+    }
+
+    // CJK: 6-char name → no issue (just past the threshold).
+    #[test]
+    fn test_name_japanese_six_chars_passes() {
+        let blocks = vec![named_block("エラーを返す")];
+        let issues = check_test_name(&blocks, path());
+        assert_eq!(issues.len(), 0);
+    }
+
+    // CJK: a name mixing Latin/digits with CJK is measured by chars and passes.
+    #[test]
+    fn test_name_mixed_latin_cjk_passes() {
+        let blocks = vec![named_block("POST以外は405を返すこと")];
+        let issues = check_test_name(&blocks, path());
+        assert_eq!(issues.len(), 0);
     }
 
     fn empty_block() -> TestBlock {
