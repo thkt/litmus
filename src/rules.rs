@@ -224,15 +224,33 @@ const MOCK_MATCHERS: &[&str] = &[
     "toHaveNthResolvedWith",
 ];
 
+// Matchers that assert the arguments the SUT passed to a collaborator (a
+// boundary contract), e.g. `expect(db.query).toHaveBeenCalledWith(buildQuery)`.
+// These verify the SUT's outgoing call shape, so a block carrying one is a
+// London-school boundary test rather than a self-mock tautology and must not
+// fire mock-only (#82). The Returned*/Resolved* `*With` matchers stay in
+// MOCK_MATCHERS unlisted here: they assert the mock's own configured output,
+// which is still a tautology.
+const CALL_ARG_CONTRACT_MATCHERS: &[&str] = &[
+    "toHaveBeenCalledWith",
+    "toHaveBeenCalledExactlyOnceWith",
+    "toHaveBeenLastCalledWith",
+    "toHaveBeenNthCalledWith",
+];
+
 pub fn check_mock_only(blocks: &[TestBlock], file: &Path) -> Vec<Issue> {
     let mut issues = Vec::new();
     for block in blocks {
-        if !block.assertions.is_empty()
+        let all_mock = !block.assertions.is_empty()
             && block
                 .assertions
                 .iter()
-                .all(|a| MOCK_MATCHERS.contains(&a.matcher.as_str()))
-        {
+                .all(|a| MOCK_MATCHERS.contains(&a.matcher.as_str()));
+        let asserts_call_args = block
+            .assertions
+            .iter()
+            .any(|a| CALL_ARG_CONTRACT_MATCHERS.contains(&a.matcher.as_str()));
+        if all_mock && !asserts_call_args {
             let matchers: Vec<&str> = block
                 .assertions
                 .iter()
@@ -656,9 +674,42 @@ mod tests {
         assert_eq!(issues.len(), 0);
     }
 
-    // T-036: all mock matchers → mock-only
+    // T-036: occurrence-only mock matchers (no call-arg contract) → mock-only
     #[test]
     fn mock_only_detected() {
+        let blocks = vec![block(
+            vec![
+                mock_matcher_assertion("toHaveBeenCalled"),
+                mock_matcher_assertion("toHaveBeenCalledTimes"),
+            ],
+            vec![],
+        )];
+        let issues = check_mock_only(&blocks, path());
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].rule, "mock-only");
+    }
+
+    // T-036b: a call-arg contract matcher (the SUT's outgoing call shape) clears
+    // mock-only even when it is the only assertion, so London-school boundary
+    // tests are not false positives (#82).
+    #[test]
+    fn mock_only_call_arg_contract_cleared() {
+        for matcher in [
+            "toHaveBeenCalledWith",
+            "toHaveBeenCalledExactlyOnceWith",
+            "toHaveBeenLastCalledWith",
+            "toHaveBeenNthCalledWith",
+        ] {
+            let blocks = vec![block(vec![mock_matcher_assertion(matcher)], vec![])];
+            let issues = check_mock_only(&blocks, path());
+            assert_eq!(issues.len(), 0, "{matcher} should clear mock-only");
+        }
+    }
+
+    // T-036c: a call-arg contract matcher clears mock-only even when paired with
+    // occurrence-only mock matchers in the same block.
+    #[test]
+    fn mock_only_call_arg_contract_clears_mixed_mock_matchers() {
         let blocks = vec![block(
             vec![
                 mock_matcher_assertion("toHaveBeenCalledWith"),
@@ -667,8 +718,7 @@ mod tests {
             vec![],
         )];
         let issues = check_mock_only(&blocks, path());
-        assert_eq!(issues.len(), 1);
-        assert_eq!(issues[0].rule, "mock-only");
+        assert_eq!(issues.len(), 0);
     }
 
     // T-037: mock matcher + value matcher mixed → no issue
@@ -693,23 +743,30 @@ mod tests {
         assert_eq!(issues.len(), 0);
     }
 
-    // T-039: toHaveReturnedWith → mock-only
+    // T-039: the Returned* `*With` matchers assert the mock's own configured
+    // output (a tautology), so they stay fire-worthy and must not be mistaken
+    // for the call-arg contract family. Guards the boundary the rule comment
+    // warns about, symmetric to the Resolved* coverage in T-039b (#82).
     #[test]
     fn mock_only_return_matchers() {
-        let blocks = vec![block(
-            vec![mock_matcher_assertion("toHaveReturnedWith")],
-            vec![],
-        )];
-        let issues = check_mock_only(&blocks, path());
-        assert_eq!(issues.len(), 1);
+        for matcher in [
+            "toHaveReturnedWith",
+            "toHaveLastReturnedWith",
+            "toHaveNthReturnedWith",
+        ] {
+            let blocks = vec![block(vec![mock_matcher_assertion(matcher)], vec![])];
+            let issues = check_mock_only(&blocks, path());
+            assert_eq!(issues.len(), 1, "{matcher} should stay mock-only");
+        }
     }
 
-    // T-039b: vitest spy matchers missing from the list still count as mock-only (#30)
+    // T-039b: vitest spy matchers missing from the list still count as mock-only (#30).
+    // toHaveBeenCalledExactlyOnceWith is excluded: it asserts a call-arg contract
+    // and is covered by mock_only_call_arg_contract_cleared (#82).
     #[test]
     fn mock_only_vitest_call_and_resolve_matchers() {
         for matcher in [
             "toHaveBeenCalledOnce",
-            "toHaveBeenCalledExactlyOnceWith",
             "toHaveBeenCalledBefore",
             "toHaveBeenCalledAfter",
             "toHaveResolved",

@@ -1,6 +1,5 @@
-test("records the call and returns the saved id", () => {
-  const log = vi.fn();
-  const id = record(log);
-  expect(id).toBe(7);
-  expect(log).toHaveBeenCalledOnce();
+test("forwards the tenant-scoped filter to the database", () => {
+  const db = { query: vi.fn() };
+  listUsers(db, 42);
+  expect(db.query).toHaveBeenCalledWith({ where: { tenantId: 42 } });
 });
