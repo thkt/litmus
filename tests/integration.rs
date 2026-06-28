@@ -289,43 +289,6 @@ test("mock only", () => {
     assert!(stdout.contains("mock-only"), "stdout: {stdout}");
 }
 
-// T-052: short test name → exit 2 with test-name-quality
-#[test]
-fn test_name_quality_short_name_detected() {
-    let dir = TempDir::new().unwrap();
-    fs::write(
-        dir.path().join("naming.test.ts"),
-        r#"test("should work", () => {
-    expect(result).toBe(42)
-})"#,
-    )
-    .unwrap();
-
-    let output = litmus(dir.path());
-    assert_eq!(output.status.code(), Some(2));
-
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("test-name-quality"), "stdout: {stdout}");
-    assert!(stdout.contains("should work"), "stdout: {stdout}");
-    assert!(stdout.contains("words: 2"), "stdout: {stdout}");
-}
-
-// T-053: 4-word test name → exit 0
-#[test]
-fn test_name_quality_good_name_passes() {
-    let dir = TempDir::new().unwrap();
-    fs::write(
-        dir.path().join("good_name.test.ts"),
-        r#"test("returns user by id", () => {
-    expect(result).toBe(42)
-})"#,
-    )
-    .unwrap();
-
-    let output = litmus(dir.path());
-    assert_eq!(output.status.code(), Some(0));
-}
-
 // T-301: empty body → empty-test
 #[test]
 fn detects_empty_test() {

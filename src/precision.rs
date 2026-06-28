@@ -72,7 +72,6 @@ const CORPUS: &[CorpusSample] = corpus![
     "skipped-test",
     "snapshot-external",
     "tautological",
-    "test-name-quality",
     "weak-assertion",
 ];
 

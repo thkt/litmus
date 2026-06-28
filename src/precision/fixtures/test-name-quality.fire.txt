@@ -1,9 +1,0 @@
-test("works", () => {
-  const result = compute();
-  expect(result).toBe(42);
-});
-
-test("削除", () => {
-  const result = compute();
-  expect(result).toBe(42);
-});
