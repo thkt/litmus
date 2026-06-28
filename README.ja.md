@@ -39,7 +39,6 @@ LLM生成テストはこの問題を増幅する — 構文的には正しいが
 | `mock-overuse`      | mock数がassertion数を超過             | `vi.fn()` が3つ、`expect` が1つ                       |
 | `tautological`      | リテラル値への常に通るassertion       | `expect(true).toBe(true)`                             |
 | `mock-only`         | mockの呼ばれ方だけを検証              | `toHaveBeenCalledWith` / `toHaveBeenCalledTimes` のみ |
-| `test-name-quality` | 失敗時に原因が分からないテスト名      | `"works"`, `"should work"`                            |
 | `snapshot-external` | 外部snapshotファイルに対するassertion | `expect(html).toMatchSnapshot()`                      |
 
 Yoni Goldberg著 [javascript-testing-best-practices](https://github.com/goldbergyoni/javascript-testing-best-practices) に基づく。
@@ -52,7 +51,6 @@ litmusは [oxc](https://oxc.rs)（oxlintと同じパーサー）でテストフ�
 $ litmus ./src
 weak-assertion: src/auth.test.ts:15 handles login (only weak: toBeTruthy)
 mock-only: src/api.test.ts:42 fetches users (matchers: toHaveBeenCalledWith, toHaveBeenCalledTimes)
-test-name-quality: src/utils.test.ts:8 works (words: 1)
 ```
 
 #### 終了コード

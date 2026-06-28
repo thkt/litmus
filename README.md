@@ -39,7 +39,6 @@ LLM-generated tests amplify this problem — they produce syntactically valid te
 | `mock-overuse`      | Tests where mock setup exceeds assertions         | 3 `vi.fn()` calls, 1 `expect`                         |
 | `tautological`      | Assertions on literal values that always pass     | `expect(true).toBe(true)`                             |
 | `mock-only`         | Tests verifying only mock interactions            | Only `toHaveBeenCalledWith` / `toHaveBeenCalledTimes` |
-| `test-name-quality` | Test names too vague to diagnose failures         | `"works"`, `"should work"`                            |
 | `missing-act`       | Tests asserting on arranged data with no SUT call | `const x = 42; expect(x).toBe(42)`                    |
 | `snapshot-external` | Tests asserting against an external snapshot file | `expect(html).toMatchSnapshot()`                      |
 
@@ -53,7 +52,6 @@ litmus parses test files with [oxc](https://oxc.rs) (the same parser behind oxli
 $ litmus ./src
 weak-assertion: src/auth.test.ts:15 handles login (only weak: toBeTruthy)
 mock-only: src/api.test.ts:42 fetches users (matchers: toHaveBeenCalledWith, toHaveBeenCalledTimes)
-test-name-quality: src/utils.test.ts:8 works (words: 1)
 ```
 
 #### Exit codes

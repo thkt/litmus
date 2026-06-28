@@ -42,7 +42,6 @@ pub const RULE_CATALOG: &[&str] = &[
     "skipped-test",
     "snapshot-external",
     "tautological",
-    "test-name-quality",
     "weak-assertion",
 ];
 
@@ -64,7 +63,6 @@ pub const CHECKS: &[CheckFn] = &[
     check_mock_overuse,
     check_tautological,
     check_mock_only,
-    check_test_name,
     check_dummy_data,
     check_missing_act,
     check_snapshot_external,
@@ -72,7 +70,7 @@ pub const CHECKS: &[CheckFn] = &[
 
 impl Issue {
     // Build an Issue, re-owning the borrowed file path and test name internally
-    // so the 14 check_* sites stop repeating `file.to_path_buf()` /
+    // so the check_* sites stop repeating `file.to_path_buf()` /
     // `block.name.clone()`. Predicates and per-rule line attribution stay at the
     // call site; only the literal's field plumbing is centralized here (#54).
     fn new(rule: &'static str, file: &Path, line: u32, test_name: &str, detail: String) -> Self {
@@ -359,46 +357,6 @@ pub fn check_catch_only_assertion(blocks: &[TestBlock], file: &Path) -> Vec<Issu
                 block.line,
                 &block.name,
                 format!("all {} assertions inside catch", block.assertions.len()),
-            ));
-        }
-    }
-    issues
-}
-
-// CJK scripts (Han, Hiragana, Katakana) write words without spaces, so
-// split_whitespace cannot measure them — a fully descriptive Japanese name
-// collapses to one "word". Detect CJK to switch the vagueness metric below.
-fn is_cjk(c: char) -> bool {
-    matches!(c,
-        '\u{3040}'..='\u{309F}'   // Hiragana
-        | '\u{30A0}'..='\u{30FF}' // Katakana
-        | '\u{3400}'..='\u{4DBF}' // CJK Unified Ideographs Extension A
-        | '\u{4E00}'..='\u{9FFF}' // CJK Unified Ideographs
-    )
-}
-
-pub fn check_test_name(blocks: &[TestBlock], file: &Path) -> Vec<Issue> {
-    let mut issues = Vec::new();
-    for block in blocks {
-        // CJK names rarely contain spaces, so the word count collapses to 1 and
-        // flagged every Japanese name (issue #78). For CJK, switch to a length
-        // cutoff (<= 5 non-space chars) — a coarse proxy for vagueness, not a
-        // measure of it. Non-CJK keeps the word count, which catches phrases the
-        // char count would miss (English "should work": vague at 2 words, 11 chars).
-        let (metric, count, too_short) = if block.name.chars().any(is_cjk) {
-            let chars = block.name.chars().filter(|c| !c.is_whitespace()).count();
-            ("chars", chars, chars <= 5)
-        } else {
-            let words = block.name.split_whitespace().count();
-            ("words", words, words <= 2)
-        };
-        if too_short {
-            issues.push(Issue::new(
-                "test-name-quality",
-                file,
-                block.line,
-                &block.name,
-                format!("{metric}: {count}"),
             ));
         }
     }
@@ -767,136 +725,6 @@ mod tests {
         }
     }
 
-    fn named_block(name: &str) -> TestBlock {
-        TestBlock {
-            name: name.into(),
-            line: 1,
-            assertions: vec![strong_assertion()],
-            mock_calls: vec![],
-            modifier: None,
-            has_empty_body: false,
-            has_act: true,
-            bound_names: Vec::new(),
-            catch_swallows: Vec::new(),
-            catch_masks: Vec::new(),
-            dummy_literals: Vec::new(),
-        }
-    }
-
-    // T-043: 1-word test name → issue
-    #[test]
-    fn test_name_one_word_detected() {
-        let blocks = vec![named_block("works")];
-        let issues = check_test_name(&blocks, path());
-        assert_eq!(issues.len(), 1);
-        assert_eq!(issues[0].rule, "test-name-quality");
-        assert!(issues[0].detail.contains("words: 1"));
-    }
-
-    // T-044: 2-word test name → issue
-    #[test]
-    fn test_name_two_words_detected() {
-        let blocks = vec![named_block("should work")];
-        let issues = check_test_name(&blocks, path());
-        assert_eq!(issues.len(), 1);
-        assert!(issues[0].detail.contains("words: 2"));
-    }
-
-    // T-045: 4-word test name → no issue
-    #[test]
-    fn test_name_four_words_passes() {
-        let blocks = vec![named_block("returns user by id")];
-        let issues = check_test_name(&blocks, path());
-        assert_eq!(issues.len(), 0);
-    }
-
-    // T-054: 3-word boundary → no issue (exact threshold)
-    #[test]
-    fn test_name_three_words_passes() {
-        let blocks = vec![named_block("returns correct value")];
-        let issues = check_test_name(&blocks, path());
-        assert_eq!(issues.len(), 0);
-    }
-
-    // T-046: empty test name → issue (0 words)
-    #[test]
-    fn test_name_empty_detected() {
-        let blocks = vec![named_block("")];
-        let issues = check_test_name(&blocks, path());
-        assert_eq!(issues.len(), 1);
-        assert!(issues[0].detail.contains("words: 0"));
-    }
-
-    // T-048: mixed blocks — only short name reported
-    #[test]
-    fn test_name_mixed_blocks_only_short_reported() {
-        let blocks = vec![named_block("works"), named_block("returns user by id")];
-        let issues = check_test_name(&blocks, path());
-        assert_eq!(issues.len(), 1);
-        assert_eq!(issues[0].test_name, "works");
-    }
-
-    // T-049: camelCase single token → issue
-    #[test]
-    fn test_name_camel_case_single_word() {
-        let blocks = vec![named_block("getUserById")];
-        let issues = check_test_name(&blocks, path());
-        assert_eq!(issues.len(), 1);
-        assert!(issues[0].detail.contains("words: 1"));
-    }
-
-    // T-050: whitespace-only name → issue (0 words)
-    #[test]
-    fn test_name_whitespace_only_detected() {
-        let blocks = vec![named_block("   ")];
-        let issues = check_test_name(&blocks, path());
-        assert_eq!(issues.len(), 1);
-        assert!(issues[0].detail.contains("words: 0"));
-    }
-
-    // CJK: a descriptive Japanese name has no internal whitespace, so it must be
-    // measured by characters, not words, and must pass.
-    #[test]
-    fn test_name_japanese_descriptive_passes() {
-        let blocks = vec![named_block("プロンプト削除で不正なUUID形式は400を返すこと")];
-        let issues = check_test_name(&blocks, path());
-        assert_eq!(issues.len(), 0);
-    }
-
-    // CJK: a vague Japanese name (2 chars) → issue, reported by chars.
-    #[test]
-    fn test_name_japanese_vague_detected() {
-        let blocks = vec![named_block("削除")];
-        let issues = check_test_name(&blocks, path());
-        assert_eq!(issues.len(), 1);
-        assert!(issues[0].detail.contains("chars: 2"));
-    }
-
-    // CJK: 5-char boundary → issue (threshold is <= 5).
-    #[test]
-    fn test_name_japanese_five_chars_detected() {
-        let blocks = vec![named_block("削除テスト")];
-        let issues = check_test_name(&blocks, path());
-        assert_eq!(issues.len(), 1);
-        assert!(issues[0].detail.contains("chars: 5"));
-    }
-
-    // CJK: 6-char name → no issue (just past the threshold).
-    #[test]
-    fn test_name_japanese_six_chars_passes() {
-        let blocks = vec![named_block("エラーを返す")];
-        let issues = check_test_name(&blocks, path());
-        assert_eq!(issues.len(), 0);
-    }
-
-    // CJK: a name mixing Latin/digits with CJK is measured by chars and passes.
-    #[test]
-    fn test_name_mixed_latin_cjk_passes() {
-        let blocks = vec![named_block("POST以外は405を返すこと")];
-        let issues = check_test_name(&blocks, path());
-        assert_eq!(issues.len(), 0);
-    }
-
     fn empty_block() -> TestBlock {
         TestBlock {
             name: "test case".into(),
@@ -1256,14 +1084,14 @@ mod tests {
         assert_eq!(issues[0].severity(), Severity::Blocking);
     }
 
-    // T-011: RULE_CATALOG lists 14 rule names with no duplicates.
+    // T-011: RULE_CATALOG lists 13 rule names with no duplicates.
     #[test]
-    fn rule_catalog_has_fourteen_unique_rules() {
-        assert_eq!(RULE_CATALOG.len(), 14);
+    fn rule_catalog_has_thirteen_unique_rules() {
+        assert_eq!(RULE_CATALOG.len(), 13);
         let mut sorted = RULE_CATALOG.to_vec();
         sorted.sort_unstable();
         sorted.dedup();
-        assert_eq!(sorted.len(), 14, "RULE_CATALOG has duplicate rule names");
+        assert_eq!(sorted.len(), 13, "RULE_CATALOG has duplicate rule names");
     }
 
     // T-330: CHECKS enrols exactly as many functions as RULE_CATALOG names, so

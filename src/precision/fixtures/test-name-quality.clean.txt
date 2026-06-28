@@ -1,9 +1,0 @@
-test("returns the computed total", () => {
-  const result = compute();
-  expect(result).toBe(42);
-});
-
-test("プロンプト削除で不正なUUID形式は400を返すこと", () => {
-  const result = compute();
-  expect(result).toBe(42);
-});
