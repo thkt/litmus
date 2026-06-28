@@ -274,7 +274,7 @@ test("tautological", () => {
     expect(true).toBe(true)
 })
 test("mock only", () => {
-    expect(mockFn).toHaveBeenCalledWith("/api")
+    expect(mockFn).toHaveBeenCalled()
     expect(mockFn).toHaveBeenCalledTimes(1)
 })
 "#,
