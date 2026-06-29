@@ -896,13 +896,43 @@ fn collect_pattern_names(pat: &BindingPattern<'_>, out: &mut Vec<String>) {
     }
 }
 
+// A binding pattern can hide a production call in two spots a name-collector skips:
+// a destructuring default (`const { a = run() } = obj`, on `AssignmentPattern::right`)
+// and a computed key (`const { [run()]: a } = obj`, on a computed `BindingProperty::key`).
+// `collect_pattern_names` skips both since it only gathers names; missing either leaves
+// the only Act in the declaration invisible and missing-act fires a false positive.
+fn pattern_has_act(pat: &BindingPattern<'_>) -> bool {
+    match pat {
+        BindingPattern::BindingIdentifier(_) => false,
+        BindingPattern::ObjectPattern(obj) => {
+            obj.properties.iter().any(|prop| {
+                (prop.computed && prop.key.as_expression().is_some_and(expr_has_act))
+                    || pattern_has_act(&prop.value)
+            }) || obj
+                .rest
+                .as_ref()
+                .is_some_and(|rest| pattern_has_act(&rest.argument))
+        }
+        BindingPattern::ArrayPattern(arr) => {
+            arr.elements.iter().flatten().any(pattern_has_act)
+                || arr
+                    .rest
+                    .as_ref()
+                    .is_some_and(|rest| pattern_has_act(&rest.argument))
+        }
+        BindingPattern::AssignmentPattern(ap) => {
+            expr_has_act(&ap.right) || pattern_has_act(&ap.left)
+        }
+    }
+}
+
 fn stmt_has_act(stmt: &Statement<'_>) -> bool {
     match stmt {
         Statement::ExpressionStatement(es) => expr_has_act(&es.expression),
         Statement::VariableDeclaration(vd) => vd
             .declarations
             .iter()
-            .any(|d| d.init.as_ref().is_some_and(expr_has_act)),
+            .any(|d| d.init.as_ref().is_some_and(expr_has_act) || pattern_has_act(&d.id)),
         Statement::ReturnStatement(rs) => rs.argument.as_ref().is_some_and(expr_has_act),
         Statement::BlockStatement(bs) => body_has_act(&bs.body),
         Statement::IfStatement(s) => {
@@ -2636,6 +2666,33 @@ describe("outer", () => {
     #[test]
     fn has_act_true_for_object_spread_call() {
         let blocks = parse(r#"test("x", () => { const o = { ...gen() }; expect(o.a).toBe(1) })"#);
+        assert!(blocks[0].has_act);
+    }
+
+    // T-310: a production call in a destructuring default value is an Act. Without
+    // scanning the binding pattern, `const { a = run() } = obj` hides its only call
+    // in the default and missing-act fires a false positive.
+    #[test]
+    fn has_act_true_for_destructuring_default_call() {
+        let blocks = parse(r#"test("x", () => { const { a = run() } = obj; expect(a).toBe(1) })"#);
+        assert!(blocks[0].has_act);
+    }
+
+    // T-311: an array-destructuring default reaches the same Act through a distinct
+    // pattern arm (`ArrayPattern` rather than `ObjectPattern`), so it needs its own
+    // contract; a refactor breaking the array recursion would leave T-310 green.
+    #[test]
+    fn has_act_true_for_array_destructuring_default_call() {
+        let blocks = parse(r#"test("x", () => { const [a = run()] = arr; expect(a).toBe(1) })"#);
+        assert!(blocks[0].has_act);
+    }
+
+    // T-312: a computed destructuring key is the last spot a call can hide in a
+    // binding pattern (`const { [run()]: a } = obj`). The key, not the value, carries
+    // the Act, so scanning only `prop.value` would let missing-act fire a false positive.
+    #[test]
+    fn has_act_true_for_computed_destructuring_key_call() {
+        let blocks = parse(r#"test("x", () => { const { [run()]: a } = obj; expect(a).toBe(1) })"#);
         assert!(blocks[0].has_act);
     }
 }
