@@ -33,13 +33,21 @@ LLM生成テストはこの問題を増幅する — 構文的には正しいが
 
 #### litmus が検出するもの
 
-| ルール              | 検出内容                              | 例                                                    |
-| ------------------- | ------------------------------------- | ----------------------------------------------------- |
-| `weak-assertion`    | 弱いmatcherのみ、またはassertionなし  | `expect(x).toBeTruthy()` が唯一のassertion            |
-| `mock-overuse`      | mock数がassertion数を超過             | `vi.fn()` が3つ、`expect` が1つ                       |
-| `tautological`      | リテラル値への常に通るassertion       | `expect(true).toBe(true)`                             |
-| `mock-only`         | mockの呼ばれ方だけを検証              | `toHaveBeenCalledWith` / `toHaveBeenCalledTimes` のみ |
-| `snapshot-external` | 外部snapshotファイルに対するassertion | `expect(html).toMatchSnapshot()`                      |
+| ルール                  | 深刻度 | 検出内容                                       | 例                                                    |
+| ----------------------- | ------ | ---------------------------------------------- | ----------------------------------------------------- |
+| `weak-assertion`        | block  | 弱いmatcherのみ、またはassertionなし           | `expect(x).toBeTruthy()` が唯一のassertion            |
+| `tautological`          | block  | リテラル値への常に通るassertion                | `expect(true).toBe(true)`                             |
+| `mock-overuse`          | block  | mock数がassertion数を超過                      | `vi.fn()` が3つ、`expect` が1つ                       |
+| `mock-only`             | block  | mockの呼ばれ方だけを検証                       | `toHaveBeenCalledWith` / `toHaveBeenCalledTimes` のみ |
+| `missing-act`           | warn   | arrange済みデータにassertするがSUT呼び出しなし | `const x = 42; expect(x).toBe(42)`                    |
+| `dummy-data`            | warn   | プレースホルダ値 (foo/bar/baz/qux/hoge/fuga)   | `createUser({ name: "foo" })`                         |
+| `snapshot-external`     | warn   | 外部snapshotファイルに対するassertion          | `expect(html).toMatchSnapshot()`                      |
+| `empty-test`            | block  | テスト本体が空 (`.todo` は除外)                | `test("works", () => {})`                             |
+| `skipped-test`          | block  | skip または todo されたテスト                  | `test.skip("works", ...)`                             |
+| `catch-swallow`         | block  | catch ブロックに assertion も throw もない     | `try { act() } catch {}`                              |
+| `catch-masks-assertion` | block  | try と catch 双方が assert し失敗を握りつぶす  | `try { expect(a) } catch { expect(b) }`               |
+| `catch-only-assertion`  | block  | 全 assertion が catch 内にある                 | `catch` ブロック内のみの assertion                    |
+| `conditional-assertion` | block  | 全 assertion が `if` 内にある                  | `if (x) { expect(...) }`                              |
 
 Yoni Goldberg著 [javascript-testing-best-practices](https://github.com/goldbergyoni/javascript-testing-best-practices) に基づく。
 
@@ -96,8 +104,9 @@ litmus --json ./src
 
 #### 対応ファイルパターン
 
-- `**/*.test.ts`
-- `**/*.test.tsx`
+`**/*.test.*` と `**/*.spec.*` の glob を走査し、拡張子が次のいずれかのファイルを対象とする:
+
+- `.ts` `.tsx` `.js` `.jsx` `.mjs` `.cjs` `.mts` `.cts`
 
 自動除外: `node_modules/`, `.git/`, `dist/`, `build/`, `target/`
 
@@ -112,6 +121,4 @@ litmus --json ./src
 
 計画中のルールは [Issues](https://github.com/thkt/litmus/issues) を参照:
 
-- [#1](https://github.com/thkt/litmus/issues/1) ダミーデータ検出 (`"foo"`, `"bar"`, `123`)
-- [#2](https://github.com/thkt/litmus/issues/2) AAAパターンのAct不在検出
 - [#3](https://github.com/thkt/litmus/issues/3) テスト間の共有状態検出
