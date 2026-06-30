@@ -1,4 +1,4 @@
-test("uppercases the provided first name", () => {
-  const result = normalize("foo");
-  expect(result).toBe("FOO");
+test("builds a normalized user record from the provided fields", () => {
+  const result = createUser({ name: "foo", role: "bar" });
+  expect(result.name).toBe("FOO");
 });

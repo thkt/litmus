@@ -1,4 +1,7 @@
-test("returns the computed value unconditionally", () => {
+test("returns the value and validates the optional detail when present", () => {
   const result = compute();
   expect(result.value).toBe(42);
+  if (result.detail) {
+    expect(result.detail.code).toBe("ok");
+  }
 });

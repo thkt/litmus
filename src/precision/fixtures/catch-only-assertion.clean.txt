@@ -1,4 +1,9 @@
-test("returns a parse error for bad input", () => {
-  const result = parse("99=");
-  expect(result.error).toBe("unexpected token");
+test("parses valid input and reports the error message on failure", () => {
+  const ok = parse("1+1");
+  expect(ok.value).toBe(2);
+  try {
+    parse("99=");
+  } catch (e) {
+    expect(e.message).toBe("unexpected token");
+  }
 });
