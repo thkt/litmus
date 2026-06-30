@@ -33,14 +33,21 @@ LLM-generated tests amplify this problem — they produce syntactically valid te
 
 #### What litmus detects
 
-| Rule                | Detects                                           | Example                                               |
-| ------------------- | ------------------------------------------------- | ----------------------------------------------------- |
-| `weak-assertion`    | Tests with only weak matchers or no assertions    | `expect(x).toBeTruthy()` as sole assertion            |
-| `mock-overuse`      | Tests where mock setup exceeds assertions         | 3 `vi.fn()` calls, 1 `expect`                         |
-| `tautological`      | Assertions on literal values that always pass     | `expect(true).toBe(true)`                             |
-| `mock-only`         | Tests verifying only mock interactions            | Only `toHaveBeenCalledWith` / `toHaveBeenCalledTimes` |
-| `missing-act`       | Tests asserting on arranged data with no SUT call | `const x = 42; expect(x).toBe(42)`                    |
-| `snapshot-external` | Tests asserting against an external snapshot file | `expect(html).toMatchSnapshot()`                      |
+| Rule                    | Severity | Detects                                               | Example                                               |
+| ----------------------- | -------- | ----------------------------------------------------- | ----------------------------------------------------- |
+| `weak-assertion`        | block    | Only weak matchers or no assertions                   | `expect(x).toBeTruthy()` as sole assertion            |
+| `tautological`          | block    | Assertions on literal values that always pass         | `expect(true).toBe(true)`                             |
+| `mock-overuse`          | block    | Mock setup exceeds assertions                         | 3 `vi.fn()` calls, 1 `expect`                         |
+| `mock-only`             | block    | Verifies only mock interactions                       | Only `toHaveBeenCalledWith` / `toHaveBeenCalledTimes` |
+| `missing-act`           | warn     | Asserts on arranged data with no SUT call             | `const x = 42; expect(x).toBe(42)`                    |
+| `dummy-data`            | warn     | Placeholder literals (foo/bar/baz/qux/hoge/fuga)      | `createUser({ name: "foo" })`                         |
+| `snapshot-external`     | warn     | Asserts against an external snapshot file             | `expect(html).toMatchSnapshot()`                      |
+| `empty-test`            | block    | Test body is empty (`.todo` excluded)                 | `test("works", () => {})`                             |
+| `skipped-test`          | block    | Test is skipped or marked todo                        | `test.skip("works", ...)`                             |
+| `catch-swallow`         | block    | Catch block has no assertion and no throw             | `try { act() } catch {}`                              |
+| `catch-masks-assertion` | block    | Try asserts and catch asserts, swallowing the failure | `try { expect(a) } catch { expect(b) }`               |
+| `catch-only-assertion`  | block    | Every assertion lives inside catch                    | assertions only in the `catch` block                  |
+| `conditional-assertion` | block    | Every assertion lives inside `if`                     | `if (x) { expect(...) }`                              |
 
 Based on [javascript-testing-best-practices](https://github.com/goldbergyoni/javascript-testing-best-practices) by Yoni Goldberg.
 
@@ -97,8 +104,9 @@ With `--json`, stdout carries a single `{"issues":[...],"errors":[...]}` documen
 
 #### Supported file patterns
 
-- `**/*.test.ts`
-- `**/*.test.tsx`
+litmus scans the `**/*.test.*` and `**/*.spec.*` globs, then keeps files whose extension is one of:
+
+- `.ts` `.tsx` `.js` `.jsx` `.mjs` `.cjs` `.mts` `.cts`
 
 Automatically excludes: `node_modules/`, `.git/`, `dist/`, `build/`, `target/`
 
@@ -113,6 +121,4 @@ Automatically excludes: `node_modules/`, `.git/`, `dist/`, `build/`, `target/`
 
 See [Issues](https://github.com/thkt/litmus/issues) for planned rules:
 
-- [#1](https://github.com/thkt/litmus/issues/1) Dummy data detection (`"foo"`, `"bar"`, `123`)
-- [#2](https://github.com/thkt/litmus/issues/2) Missing Act in AAA pattern
 - [#3](https://github.com/thkt/litmus/issues/3) Shared test state detection
