@@ -699,9 +699,26 @@ fn try_assertion(
         return None;
     };
 
-    let (target, target_kind, target_root) = find_expect_target(&member.object, src)?;
+    let expect_call = find_expect_call(&member.object)?;
+    let arg = expect_call.arguments.first();
+    let (target, target_kind, target_root) = match arg {
+        Some(arg) => {
+            let text = arg.span().source_text(src.text).to_owned();
+            let kind = classify_argument(arg);
+            let root = arg.as_expression().and_then(expr_root_ident);
+            (text, kind, root)
+        }
+        None => (String::new(), TargetKind::Other, None),
+    };
     let matcher = member.property.name.to_string();
-    let is_weak = WEAK_MATCHERS.contains(&matcher.as_str());
+    // A weak matcher (toBeTruthy/toBeDefined/toBeFalsy) is normally weak, but a
+    // throwing Testing Library query (getBy*/findBy*) in `expect(...)` already
+    // guarantees the element exists, so the assertion self-verifies (#91).
+    let is_weak = WEAK_MATCHERS.contains(&matcher.as_str())
+        && !arg
+            .and_then(|arg| arg.as_expression())
+            .and_then(arg_query_name)
+            .is_some_and(is_throwing_query_name);
     let line = src.line(call.span.start);
 
     Some(Assertion {
@@ -715,39 +732,48 @@ fn try_assertion(
     })
 }
 
-fn find_expect_target(
-    expr: &Expression<'_>,
-    src: &Source,
-) -> Option<(String, TargetKind, Option<String>)> {
+fn find_expect_call<'a>(expr: &'a Expression<'a>) -> Option<&'a CallExpression<'a>> {
     match expr {
         Expression::CallExpression(call) => {
-            if matches!(callee_name(&call.callee), Some(("expect", _))) {
-                let result = call
-                    .arguments
-                    .first()
-                    .map(|arg| {
-                        let text = arg.span().source_text(src.text).to_owned();
-                        let kind = classify_argument(arg);
-                        let root = arg.as_expression().and_then(expr_root_ident);
-                        (text, kind, root)
-                    })
-                    .unwrap_or_else(|| (String::new(), TargetKind::Other, None));
-                Some(result)
-            } else {
-                None
-            }
+            matches!(callee_name(&call.callee), Some(("expect", _))).then_some(call)
         }
-        Expression::StaticMemberExpression(member) => find_expect_target(&member.object, src),
+        Expression::StaticMemberExpression(member) => find_expect_call(&member.object),
         // Transparent wrappers between `.matcher` and the `expect(...)` call
         // (mirrors expr_root_ident / expr_has_act): `(expect(v)).toBe`,
         // `(expect(v) as T).toBe`, `expect(v)!.toBe` all assert on expect (#31).
-        Expression::ParenthesizedExpression(p) => find_expect_target(&p.expression, src),
-        Expression::TSAsExpression(e) => find_expect_target(&e.expression, src),
-        Expression::TSSatisfiesExpression(e) => find_expect_target(&e.expression, src),
-        Expression::TSNonNullExpression(e) => find_expect_target(&e.expression, src),
-        Expression::TSTypeAssertion(e) => find_expect_target(&e.expression, src),
+        Expression::ParenthesizedExpression(p) => find_expect_call(&p.expression),
+        Expression::TSAsExpression(e) => find_expect_call(&e.expression),
+        Expression::TSSatisfiesExpression(e) => find_expect_call(&e.expression),
+        Expression::TSNonNullExpression(e) => find_expect_call(&e.expression),
+        Expression::TSTypeAssertion(e) => find_expect_call(&e.expression),
         _ => None,
     }
+}
+
+/// The query function name an `expect()` argument calls, e.g. `getByText` in
+/// `expect(screen.getByText("ok"))` or `expect(getByText("ok"))`. `findBy*` is
+/// async, so an `await` wrapper is unwrapped (`expect(await findByText(...))`).
+/// Returns None when the argument is not a (member or bare) call (#91).
+fn arg_query_name<'a>(expr: &'a Expression<'a>) -> Option<&'a str> {
+    match expr {
+        Expression::CallExpression(call) => match &call.callee {
+            Expression::Identifier(id) => Some(&id.name),
+            Expression::StaticMemberExpression(m) => Some(&m.property.name),
+            _ => None,
+        },
+        Expression::AwaitExpression(e) => arg_query_name(&e.argument),
+        _ => None,
+    }
+}
+
+/// Testing Library queries that throw when no element matches, so an element
+/// they return is already proven to exist — `expect(getByText(...)).toBeTruthy()`
+/// self-verifies and is not weak. `queryBy*`/`queryAllBy*` return null instead
+/// (no throw), so they stay weak (#91).
+fn is_throwing_query_name(name: &str) -> bool {
+    ["getBy", "getAllBy", "findBy", "findAllBy"]
+        .iter()
+        .any(|prefix| name.starts_with(prefix))
 }
 
 /// Resolves the root identifier an expression reads from, e.g. `user` in
@@ -1312,7 +1338,8 @@ describe("outer", () => {
     }
 
     // T-314: an assertion inside an awaited waitFor callback is collected (#88,
-    // the ubiquitous React Testing Library async form).
+    // the ubiquitous React Testing Library async form). `getByText` throws when
+    // absent, so `toBeTruthy` is not weak here (#91).
     #[test]
     fn collects_assertion_inside_waitfor_callback() {
         let source = r#"test("async", async () => {
@@ -1321,6 +1348,71 @@ describe("outer", () => {
             })
         })"#;
         let blocks = parse(source);
+        assert_eq!(blocks[0].assertions.len(), 1);
+        assert!(!blocks[0].assertions[0].is_weak);
+    }
+
+    // T-317: `expect(getByText(...)).toBeTruthy()` is not weak — the throwing
+    // query already guarantees the element exists, in both `screen.getByText`
+    // member and bare `getByText` forms (#91).
+    #[test]
+    fn throwing_query_arg_is_not_weak() {
+        let member = parse(
+            r#"test("found", () => {
+            expect(screen.getByText("ok")).toBeTruthy()
+        })"#,
+        );
+        assert!(!member[0].assertions[0].is_weak);
+
+        let bare = parse(
+            r#"test("found", () => {
+            expect(getAllByRole("button")).toBeTruthy()
+        })"#,
+        );
+        assert!(!bare[0].assertions[0].is_weak);
+
+        let awaited = parse(
+            r#"test("found", async () => {
+            expect(await screen.findByText("ok")).toBeTruthy()
+        })"#,
+        );
+        assert!(!awaited[0].assertions[0].is_weak);
+    }
+
+    // T-318: `queryBy*` returns null instead of throwing, so a weak matcher on
+    // its result stays weak (#91).
+    #[test]
+    fn query_by_arg_stays_weak() {
+        let blocks = parse(
+            r#"test("maybe", () => {
+            expect(screen.queryByText("ok")).toBeTruthy()
+        })"#,
+        );
+        assert!(blocks[0].assertions[0].is_weak);
+    }
+
+    // T-319: a non-query call result (callee is itself a call, not a query
+    // identifier/member) keeps the weak matcher weak — the throwing-query
+    // exclusion only applies to real queries (#91).
+    #[test]
+    fn non_query_call_arg_stays_weak() {
+        let blocks = parse(
+            r#"test("maybe", () => {
+            expect(factory()()).toBeTruthy()
+        })"#,
+        );
+        assert!(blocks[0].assertions[0].is_weak);
+    }
+
+    // T-320: an argument-less `expect()` still yields a (weak) assertion; the
+    // throwing-query check sees no argument and leaves the matcher weak (#91).
+    #[test]
+    fn arg_less_expect_stays_weak() {
+        let blocks = parse(
+            r#"test("empty", () => {
+            expect().toBeTruthy()
+        })"#,
+        );
         assert_eq!(blocks[0].assertions.len(), 1);
         assert!(blocks[0].assertions[0].is_weak);
     }
