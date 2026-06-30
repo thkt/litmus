@@ -478,6 +478,76 @@ mod tests {
         );
     }
 
+    // #89 A2: find_test_files discovers `.spec.` and every supported JS/TS/ESM
+    // extension, not just `.test.ts(x)`. A JS/spec project previously matched
+    // zero files → litmus silently exited 0 (fail-as-success). The fixture
+    // covers all eight TEST_EXTENSIONS so a dropped const entry is caught.
+    //
+    // Three exclusion classes are each represented so a broken guard is caught:
+    // (1) `helper.ts` lacks the `.test.`/`.spec.` infix → the glob never yields
+    // it; (2) `node_modules/dep.test.js` → is_excluded; (3) the snapshot and
+    // `.test.json` files match the widened `**/*.test.*` glob and sit outside
+    // EXCLUDED_DIRS (`__snapshots__` is not excluded), so only has_test_extension
+    // keeps them out of the parser. Without that filter snapshot/JSON noise would
+    // reach analyze_files.
+    #[test]
+    fn find_test_files_covers_spec_and_js_extensions() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        for name in [
+            "a.test.ts",
+            "b.spec.ts",
+            "c.test.js",
+            "d.spec.jsx",
+            "e.test.mjs",
+            "f.test.cts",
+            "g.test.tsx",
+            "h.spec.cjs",
+            "i.test.mts",
+        ] {
+            fs::write(root.join(name), "test(\"t\", () => {})").unwrap();
+        }
+        // Excluded: no test/spec infix, and inside node_modules.
+        fs::write(root.join("helper.ts"), "export const x = 1").unwrap();
+        let nm = root.join("node_modules");
+        fs::create_dir_all(&nm).unwrap();
+        fs::write(nm.join("dep.test.js"), "test(\"t\", () => {})").unwrap();
+        // Excluded by extension: matches the glob but is not a test source.
+        let snap = root.join("__snapshots__");
+        fs::create_dir_all(&snap).unwrap();
+        fs::write(snap.join("comp.test.ts.snap"), "exports[`x`] = `y`;").unwrap();
+        fs::write(root.join("fixture.test.json"), "{}").unwrap();
+
+        let mut found: Vec<String> = find_test_files(root)
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        found.sort();
+        assert_eq!(
+            found,
+            vec![
+                "a.test.ts",
+                "b.spec.ts",
+                "c.test.js",
+                "d.spec.jsx",
+                "e.test.mjs",
+                "f.test.cts",
+                "g.test.tsx",
+                "h.spec.cjs",
+                "i.test.mts",
+            ]
+        );
+    }
+
+    // #89 A2: a file matching both globs (`.test.` and `.spec.` infix) is
+    // analyzed once, not duplicated.
+    #[test]
+    fn find_test_files_dedups_test_and_spec_infix() {
+        let dir = tempfile::TempDir::new().unwrap();
+        fs::write(dir.path().join("a.test.spec.ts"), "test(\"t\", () => {})").unwrap();
+        assert_eq!(find_test_files(dir.path()).len(), 1);
+    }
+
     // T-029a: a nonexistent path is a usage error, not a clean exit 0; the
     // message names the offending path so the caller can correct it.
     #[test]

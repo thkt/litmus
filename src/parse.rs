@@ -833,7 +833,12 @@ fn mock_kind(call: &CallExpression<'_>) -> Option<MockKind> {
             let Expression::Identifier(obj) = &member.object else {
                 return None;
             };
-            if obj.name != "vi" {
+            // `vi.*` (vitest) and `jest.*` share the same mock API surface, so
+            // both must feed mock-overuse for symmetric coverage (#89 B3).
+            // Before this, mock-overuse never fired on Jest suites while
+            // mock-only (matcher based) did, leaving coverage asymmetric within
+            // one tool. Variant names keep the `Vi` prefix as an internal tag.
+            if obj.name != "vi" && obj.name != "jest" {
                 return None;
             }
             match &*member.property.name {
@@ -852,7 +857,7 @@ fn mock_kind(call: &CallExpression<'_>) -> Option<MockKind> {
 //
 // A test's "Act" is a call into production code. `body_has_act` returns true if
 // the body contains at least one such call. Calls that are part of an `expect`
-// chain or a mock setup (`vi.fn`/`vi.mock`/`vi.spyOn`/bare `mock`) are NOT acts;
+// chain or a mock setup (`vi.*`/`jest.*` fn|mock|spyOn / bare `mock`) are NOT acts;
 // every other call (including `expect(sut())`'s inner argument, a `new`, or a
 // tagged template) is. The traversal descends every expression position a call
 // can hide in, so a test whose only invocation sits in an assignment, ternary,
@@ -1678,11 +1683,38 @@ describe("outer", () => {
         assert_eq!(blocks[0].line, 3);
     }
 
-    // TC-005: non-vi member expressions ignored as mocks
+    // TC-005: jest.fn/jest.mock/jest.spyOn are recognized as mocks, symmetric
+    // with vi.* so mock-overuse fires on Jest suites too (#89 B3).
     #[test]
-    fn ignores_non_vi_member_fn() {
+    fn recognizes_jest_mock_members() {
         let source = r#"test("x", () => {
             jest.fn()
+            jest.mock("./module")
+            jest.spyOn(obj, "method")
+            expect(x).toBe(1)
+        })"#;
+        let blocks = parse(source);
+        assert_eq!(blocks[0].mock_calls.len(), 3);
+        assert_eq!(blocks[0].mock_calls[0].kind, MockKind::ViFn);
+        assert_eq!(blocks[0].mock_calls[1].kind, MockKind::ViMock);
+        assert_eq!(blocks[0].mock_calls[2].kind, MockKind::ViSpyOn);
+    }
+
+    // #89 B3: jest.* feeds act detection too (via is_act_call → mock_kind), not
+    // only mock-overuse. A body whose only call is jest.fn() is a mock setup, so
+    // it has no act — symmetric with vi.fn(). Guards against a future act-path
+    // change that re-checks `vi` directly and silently flips Jest tests.
+    #[test]
+    fn jest_mock_only_body_has_no_act() {
+        let blocks = parse(r#"test("x", () => { jest.fn() })"#);
+        assert!(!blocks[0].has_act);
+    }
+
+    // Unrelated member expressions (neither vi nor jest) stay non-mocks (#89 B3).
+    #[test]
+    fn ignores_unrelated_member_fn() {
+        let source = r#"test("x", () => {
+            foo.fn()
             expect(x).toBe(1)
         })"#;
         let blocks = parse(source);

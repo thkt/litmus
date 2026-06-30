@@ -16,6 +16,12 @@ use std::process;
 
 const EXCLUDED_DIRS: &[&str] = &["node_modules", ".git", "dist", "build", "target"];
 
+// Test files litmus analyzes: the `.test.`/`.spec.` infix (any of these
+// extensions). JS/ESM extensions are included because the outcome targets
+// TypeScript *and* JavaScript tests; without them a JS project matched zero
+// files and litmus silently reported success (fail-as-success, #89 A2).
+const TEST_EXTENSIONS: &[&str] = &["ts", "tsx", "js", "jsx", "mjs", "cjs", "mts", "cts"];
+
 // Exit codes per ADR-0066 Group 3 (Hook tool).
 //
 // Adopted:
@@ -104,7 +110,12 @@ pub struct AnalysisResult {
 }
 
 pub fn find_test_files(dir: &Path) -> Vec<PathBuf> {
-    let patterns = [dir.join("**/*.test.ts"), dir.join("**/*.test.tsx")];
+    // Two glob patterns (not one per extension) keep the tree walk count at 2,
+    // matching the pre-#89 cost: glob does not prune excluded dirs during the
+    // walk, so each pattern is a full traversal. The extension is filtered after
+    // matching via TEST_EXTENSIONS, so `**/*.test.*` stays a single walk while
+    // covering every supported extension (#89 A2, Time / hook-startup budget).
+    let patterns = [dir.join("**/*.test.*"), dir.join("**/*.spec.*")];
 
     let mut files = Vec::new();
     for pattern in &patterns {
@@ -113,13 +124,22 @@ pub fn find_test_files(dir: &Path) -> Vec<PathBuf> {
         };
         if let Ok(paths) = glob::glob(pat) {
             for entry in paths.flatten() {
-                if !is_excluded(&entry) {
+                if !is_excluded(&entry) && has_test_extension(&entry) {
                     files.push(entry);
                 }
             }
         }
     }
+    // `a.test.spec.ts` matches both globs; dedup so it is analyzed once.
+    files.sort();
+    files.dedup();
     files
+}
+
+fn has_test_extension(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|ext| TEST_EXTENSIONS.contains(&ext))
 }
 
 fn is_excluded(path: &Path) -> bool {
