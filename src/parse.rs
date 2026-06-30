@@ -247,6 +247,29 @@ fn callee_name<'a>(expr: &'a Expression<'a>) -> Option<(&'a str, Option<TestModi
             }
             None
         }
+        // `it.each(table)(name, fn)` / `describe.each(...)(...)`: the callee is
+        // itself a call to `<it|test|describe>.each(...)`, so the outer call is
+        // the test/suite and its (name, fn) arguments drive extraction (#88).
+        // Template-literal `it.each` `` `...` `` is a tagged template, not a
+        // call, so it stays unhandled here (its name is also non-literal).
+        // Modifier-combined forms (`it.only.each`, `it.skip.each`) have a
+        // member-expression object, not a bare identifier, so they fall through
+        // and stay invisible — the same as before #88; closing them is left to a
+        // follow-up since the modifier would also need to thread through.
+        Expression::CallExpression(inner) => {
+            let Expression::StaticMemberExpression(member) = &inner.callee else {
+                return None;
+            };
+            if &*member.property.name != "each" {
+                return None;
+            }
+            match &member.object {
+                Expression::Identifier(id) if matches!(&*id.name, "it" | "test" | "describe") => {
+                    Some((&id.name, None))
+                }
+                _ => None,
+            }
+        }
         _ => None,
     }
 }
@@ -292,8 +315,15 @@ fn first_string_arg(args: &[Argument<'_>]) -> Option<String> {
     }
 }
 
+// The test callback is the first function-expression argument. Scanning by
+// shape rather than a fixed index also reaches vitest's 3-arg
+// `test(name, options, fn)` form, whose callback sits at index 2 (#88).
 fn callback_body<'a>(args: &'a [Argument<'a>]) -> Option<&'a FunctionBody<'a>> {
-    match args.get(1)? {
+    args.iter().find_map(arg_function_body)
+}
+
+fn arg_function_body<'a>(arg: &'a Argument<'a>) -> Option<&'a FunctionBody<'a>> {
+    match arg {
         Argument::ArrowFunctionExpression(arrow) => Some(&arrow.body),
         Argument::FunctionExpression(func) => func.body.as_deref(),
         _ => None,
@@ -334,38 +364,20 @@ impl<'s, 'a> Collector<'s, 'a> {
     fn scan_statement(&mut self, stmt: &Statement<'_>, context: &AssertionContext) {
         match stmt {
             Statement::ExpressionStatement(es) => {
-                scan_expr(
-                    &es.expression,
-                    self.src,
-                    &mut self.assertions,
-                    &mut self.mocks,
-                    context,
-                );
+                self.scan_expr(&es.expression, context);
                 collect_dummies_expr(&es.expression, self.src, &mut self.dummies);
             }
             Statement::VariableDeclaration(vd) => {
                 for decl in &vd.declarations {
                     if let Some(init) = &decl.init {
-                        scan_expr(
-                            init,
-                            self.src,
-                            &mut self.assertions,
-                            &mut self.mocks,
-                            context,
-                        );
+                        self.scan_expr(init, context);
                         collect_dummies_expr(init, self.src, &mut self.dummies);
                     }
                 }
             }
             Statement::ReturnStatement(rs) => {
                 if let Some(arg) = &rs.argument {
-                    scan_expr(
-                        arg,
-                        self.src,
-                        &mut self.assertions,
-                        &mut self.mocks,
-                        context,
-                    );
+                    self.scan_expr(arg, context);
                     collect_dummies_expr(arg, self.src, &mut self.dummies);
                 }
             }
@@ -460,16 +472,9 @@ fn try_block_has_top_level_assertion(body: &[Statement<'_>], src: &Source) -> bo
         let Statement::ExpressionStatement(es) = stmt else {
             return false;
         };
-        let mut probe = Vec::new();
-        let mut throwaway_mocks = Vec::new();
-        scan_expr(
-            &es.expression,
-            src,
-            &mut probe,
-            &mut throwaway_mocks,
-            &AssertionContext::TryBlock,
-        );
-        !probe.is_empty()
+        let mut probe = Collector::new(src);
+        probe.scan_expr(&es.expression, &AssertionContext::TryBlock);
+        !probe.assertions.is_empty()
     })
 }
 
@@ -602,70 +607,85 @@ fn push_if_dummy(s: &StringLiteral<'_>, src: &Source, out: &mut Vec<DummyLiteral
     }
 }
 
-fn scan_expr(
-    expr: &Expression<'_>,
-    src: &Source,
-    assertions: &mut Vec<Assertion>,
-    mocks: &mut Vec<MockCall>,
-    context: &AssertionContext,
-) {
-    // Iterative worklist instead of recursion. Logical / conditional / member /
-    // callee chains are bracket-free, so the file-level bracket guard (#25)
-    // cannot bound their depth; a recursive walk overflows the stack on
-    // pathological input (tens of thousands of chained `&&`, verified). A heap
-    // stack removes the failure mode at any depth. Children are pushed in
-    // reverse so they pop in source order, preserving assertion indices (left
-    // before right in `a && b`, test before branches in a ternary).
-    let mut stack: Vec<(&Expression<'_>, AssertionContext)> = vec![(expr, *context)];
-    while let Some((expr, context)) = stack.pop() {
-        match expr {
-            Expression::CallExpression(call) => {
-                if let Some(a) = try_assertion(call, src, &context) {
-                    assertions.push(a);
-                } else if let Some(m) = try_mock(call, src) {
-                    mocks.push(m);
-                } else {
-                    // Chained calls like vi.fn().mockReturnValue()
-                    stack.push((&call.callee, context));
+impl Collector<'_, '_> {
+    fn scan_expr(&mut self, expr: &Expression<'_>, context: &AssertionContext) {
+        // Iterative worklist instead of recursion. Logical / conditional / member
+        // / callee chains are bracket-free, so the file-level bracket guard (#25)
+        // cannot bound their depth; a recursive walk overflows the stack on
+        // pathological input (tens of thousands of chained `&&`, verified). A heap
+        // stack removes the failure mode at any depth. Children are pushed in
+        // reverse so they pop in source order, preserving assertion indices (left
+        // before right in `a && b`, test before branches in a ternary).
+        let mut stack: Vec<(&Expression<'_>, AssertionContext)> = vec![(expr, *context)];
+        while let Some((expr, context)) = stack.pop() {
+            match expr {
+                Expression::CallExpression(call) => {
+                    if let Some(a) = try_assertion(call, self.src, &context) {
+                        self.assertions.push(a);
+                    } else if let Some(m) = try_mock(call, self.src) {
+                        self.mocks.push(m);
+                    } else {
+                        // A non-assertion/mock call may invoke callback arguments
+                        // inline (forEach / map / waitFor / `it.each` body), so the
+                        // assertions and mocks inside them are real. Descend into
+                        // each function-expression argument body via the full body
+                        // walk so nested catch-swallows and dummies are seen too
+                        // (#88). A function assigned to a variable or returned is a
+                        // definition, not an argument, so it stays un-descended and
+                        // weak-assertion still fires on a test that only defines it.
+                        // The body is walked eagerly here rather than via the
+                        // worklist, so a callback's assertions are ordered at this
+                        // descent point, not strictly by source position across a
+                        // `foo(cb).bar(cb)` chain; every rule reads assertions
+                        // order-independently, so only display order is affected.
+                        for arg in &call.arguments {
+                            if let Some(body) = arg_function_body(arg) {
+                                self.scan_body(&body.statements, context);
+                            }
+                        }
+                        // Chained calls like vi.fn().mockReturnValue()
+                        stack.push((&call.callee, context));
+                    }
                 }
-            }
-            Expression::StaticMemberExpression(member) => {
-                stack.push((&member.object, context));
-            }
-            Expression::AwaitExpression(ae) => {
-                stack.push((&ae.argument, context));
-            }
-            Expression::LogicalExpression(logical) => {
-                // Left operand runs unconditionally (keeps the parent context);
-                // the right operand runs only when the operator short-circuits
-                // through, so it is guarded like an if-branch assertion
-                // (e.g. `cond && expect(x).toBe(1)`).
-                stack.push((&logical.right, AssertionContext::IfBranch));
-                stack.push((&logical.left, context));
-            }
-            Expression::ConditionalExpression(conditional) => {
-                // The test runs unconditionally; both branches are guarded.
-                stack.push((&conditional.alternate, AssertionContext::IfBranch));
-                stack.push((&conditional.consequent, AssertionContext::IfBranch));
-                stack.push((&conditional.test, context));
-            }
-            Expression::ParenthesizedExpression(paren) => {
-                stack.push((&paren.expression, context));
-            }
-            Expression::SequenceExpression(seq) => {
-                // Every element of `(a, b, c)` evaluates unconditionally, so each
-                // keeps the parent context. Push in reverse for source order (#31).
-                for sub in seq.expressions.iter().rev() {
-                    stack.push((sub, context));
+                Expression::StaticMemberExpression(member) => {
+                    stack.push((&member.object, context));
                 }
+                Expression::AwaitExpression(ae) => {
+                    stack.push((&ae.argument, context));
+                }
+                Expression::LogicalExpression(logical) => {
+                    // Left operand runs unconditionally (keeps the parent context);
+                    // the right operand runs only when the operator short-circuits
+                    // through, so it is guarded like an if-branch assertion
+                    // (e.g. `cond && expect(x).toBe(1)`).
+                    stack.push((&logical.right, AssertionContext::IfBranch));
+                    stack.push((&logical.left, context));
+                }
+                Expression::ConditionalExpression(conditional) => {
+                    // The test runs unconditionally; both branches are guarded.
+                    stack.push((&conditional.alternate, AssertionContext::IfBranch));
+                    stack.push((&conditional.consequent, AssertionContext::IfBranch));
+                    stack.push((&conditional.test, context));
+                }
+                Expression::ParenthesizedExpression(paren) => {
+                    stack.push((&paren.expression, context));
+                }
+                Expression::SequenceExpression(seq) => {
+                    // Every element of `(a, b, c)` evaluates unconditionally, so
+                    // each keeps the parent context. Push in reverse for source
+                    // order (#31).
+                    for sub in seq.expressions.iter().rev() {
+                        stack.push((sub, context));
+                    }
+                }
+                // Transparent type wrappers around an assertion call, e.g.
+                // `(expect(x).toBe(1) as any)`; descend to the inner call (#31).
+                Expression::TSAsExpression(e) => stack.push((&e.expression, context)),
+                Expression::TSSatisfiesExpression(e) => stack.push((&e.expression, context)),
+                Expression::TSNonNullExpression(e) => stack.push((&e.expression, context)),
+                Expression::TSTypeAssertion(e) => stack.push((&e.expression, context)),
+                _ => {}
             }
-            // Transparent type wrappers around an assertion call, e.g.
-            // `(expect(x).toBe(1) as any)`; descend to the inner call (#31).
-            Expression::TSAsExpression(e) => stack.push((&e.expression, context)),
-            Expression::TSSatisfiesExpression(e) => stack.push((&e.expression, context)),
-            Expression::TSNonNullExpression(e) => stack.push((&e.expression, context)),
-            Expression::TSTypeAssertion(e) => stack.push((&e.expression, context)),
-            _ => {}
         }
     }
 }
@@ -1275,6 +1295,186 @@ describe("outer", () => {
         assert!(!blocks[0].assertions[1].is_weak);
     }
 
+    // T-313: an assertion inside a forEach callback is collected, not lost. The
+    // forEach call is not assertion/mock, so the scan descends into its callback
+    // argument body (#88 weak-assertion false positive on the legit loop form).
+    #[test]
+    fn collects_assertion_inside_foreach_callback() {
+        let source = r#"test("table", () => {
+            const cases = [{ a: 1, b: 2 }];
+            cases.forEach(({ a, b }) => {
+                expect(a + 1).toBe(b)
+            })
+        })"#;
+        let blocks = parse(source);
+        assert_eq!(blocks[0].assertions.len(), 1);
+        assert_eq!(blocks[0].assertions[0].matcher, "toBe");
+    }
+
+    // T-314: an assertion inside an awaited waitFor callback is collected (#88,
+    // the ubiquitous React Testing Library async form).
+    #[test]
+    fn collects_assertion_inside_waitfor_callback() {
+        let source = r#"test("async", async () => {
+            await waitFor(() => {
+                expect(screen.getByText("ok")).toBeTruthy()
+            })
+        })"#;
+        let blocks = parse(source);
+        assert_eq!(blocks[0].assertions.len(), 1);
+        assert!(blocks[0].assertions[0].is_weak);
+    }
+
+    // T-315: `it.each(table)(name, fn)` double-call shape is recognized as a test
+    // and its inner callback assertion is captured (#88 false negative).
+    #[test]
+    fn recognizes_it_each_double_call() {
+        let source = r#"it.each([[1, 2], [2, 3]])("adds %i", (a, b) => {
+            expect(a).toBe(b)
+        })"#;
+        let blocks = parse(source);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].name, "adds %i");
+        assert_eq!(blocks[0].assertions.len(), 1);
+    }
+
+    // T-316: `describe.each(table)(name, fn)` routes into the nested test block.
+    #[test]
+    fn recognizes_describe_each_double_call() {
+        let source = r#"describe.each([[1], [2]])("group %i", (n) => {
+            it("works", () => {
+                expect(n).toBe(n)
+            })
+        })"#;
+        let blocks = parse(source);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].name, "works");
+    }
+
+    // T-317: vitest's 3-arg `test(name, options, fn)` form exposes the callback,
+    // so the block and its assertion are no longer invisible (#88).
+    #[test]
+    fn collects_callback_in_three_arg_test() {
+        let source = r#"test("opts", { timeout: 1000 }, () => {
+            expect(x).toBe(1)
+        })"#;
+        let blocks = parse(source);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].assertions.len(), 1);
+    }
+
+    // T-318 (guard): a helper assigned to a const but never invoked is a
+    // definition, not an inline callback. Its expect must NOT count as an
+    // assertion, or weak-assertion would be silenced (#88 false-negative guard).
+    #[test]
+    fn does_not_descend_into_uncalled_helper_definition() {
+        let source = r#"test("defines but never asserts", () => {
+            const helper = () => { expect(x).toBe(1) };
+        })"#;
+        let blocks = parse(source);
+        assert_eq!(blocks[0].assertions.len(), 0);
+    }
+
+    // T-319 (symmetry): the outer iteration call is itself an Act, so a forEach
+    // callback that both acts and asserts keeps has_act true — no missing-act
+    // false positive once the callback assertion becomes visible (#88).
+    #[test]
+    fn foreach_callback_keeps_act_visible() {
+        let source = r#"test("acc", () => {
+            const acc = [];
+            arr.forEach((x) => {
+                acc.push(x)
+                expect(acc).toContain(x)
+            })
+        })"#;
+        let blocks = parse(source);
+        assert!(!blocks[0].assertions.is_empty());
+        assert!(blocks[0].has_act);
+    }
+
+    // T-320: descent reaches a try/catch nested in a callback, so a swallowed
+    // error inside a forEach body is recorded — the cross-rule FN chain #88 names
+    // (callback-internal catch-swallow / mock / dummy) is closed by routing the
+    // callback through the full body walk, not an assertions-only probe.
+    #[test]
+    fn records_catch_swallow_inside_callback() {
+        let source = r#"test("x", () => {
+            items.forEach(() => {
+                try { doThing() } catch {}
+            })
+        })"#;
+        let blocks = parse(source);
+        assert_eq!(blocks[0].catch_swallows.len(), 1);
+    }
+
+    // T-321: `test.each(table)(name, fn)` is the third `.each` host alongside
+    // `it`/`describe`; an unrecognized double-call makes the whole block invisible
+    // (no rule reports), so the test set member `test` is pinned explicitly (#88).
+    #[test]
+    fn recognizes_test_each_double_call() {
+        let source = r#"test.each([[1, 2]])("adds %i", (a, b) => {
+            expect(a).toBe(b)
+        })"#;
+        let blocks = parse(source);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].assertions.len(), 1);
+    }
+
+    // T-322: the descent comment claims callback-internal mocks become real; a
+    // `vi.fn()` defined inside a forEach body is recorded, pinning the mock half
+    // of that contract (T-320 pinned only catch-swallow) (#88).
+    #[test]
+    fn records_mock_inside_callback() {
+        let source = r#"test("x", () => {
+            arr.forEach(() => {
+                const m = vi.fn()
+            })
+        })"#;
+        let blocks = parse(source);
+        assert_eq!(blocks[0].mock_calls.len(), 1);
+    }
+
+    // T-323: the descent comment also names dummies as a sink it closes; a dummy
+    // literal inside a forEach body is recorded, pinning the dummy half of the
+    // contract (#88).
+    #[test]
+    fn records_dummy_inside_callback() {
+        let source = r#"test("x", () => {
+            arr.forEach(() => {
+                build("foo")
+            })
+        })"#;
+        let blocks = parse(source);
+        assert_eq!(blocks[0].dummy_literals.len(), 1);
+    }
+
+    // T-324: descent recurses through nested callbacks (forEach inside forEach),
+    // so an assertion two callback levels deep is still collected (#88).
+    #[test]
+    fn collects_assertion_in_nested_callback() {
+        let source = r#"test("x", () => {
+            outer.forEach(() => {
+                inner.forEach(() => {
+                    expect(a).toBe(b)
+                })
+            })
+        })"#;
+        let blocks = parse(source);
+        assert_eq!(blocks[0].assertions.len(), 1);
+    }
+
+    // T-325 (negative guard): a double-call whose `.each` host is not a test
+    // identifier (`db.each(rows)(...)`) is not a test, so it produces no block —
+    // the new CallExpression arm's identifier filter must reject it (#88).
+    #[test]
+    fn non_test_each_double_call_is_not_a_block() {
+        let source = r#"db.each(rows)((row) => {
+            expect(row).toBe(1)
+        })"#;
+        let blocks = parse(source);
+        assert!(blocks.is_empty());
+    }
+
     // T-010: mock and assertion counting
     #[test]
     fn counts_mocks_and_assertions() {
@@ -1703,11 +1903,15 @@ describe("outer", () => {
         assert_eq!(blocks[0].assertions[0].context, AssertionContext::IfBranch);
     }
 
-    // T-134: call arguments are not traversed (accepted FN boundary, #26)
+    // T-134: a function-expression callback argument IS traversed (#88 lifts the
+    // #26 boundary). The author wrote the assertion to run inside the callback, so
+    // it counts even when the call (setTimeout/forEach/waitFor) defers it — the
+    // common forEach/waitFor false positive matters more than the rare
+    // setTimeout-only false negative, and the AST cannot tell them apart.
     #[test]
-    fn call_argument_not_traversed() {
+    fn call_argument_callback_traversed() {
         let blocks = parse(r#"test("x", () => { setTimeout(() => expect(x).toBe(1)) })"#);
-        assert_eq!(blocks[0].assertions.len(), 0);
+        assert_eq!(blocks[0].assertions.len(), 1);
     }
 
     // T-136: assertion in a sequence expression is detected, unconditionally (#31)
