@@ -751,9 +751,9 @@ fn find_expect_call<'a>(expr: &'a Expression<'a>) -> Option<&'a CallExpression<'
 }
 
 /// The query function name an `expect()` argument calls, e.g. `getByText` in
-/// `expect(screen.getByText("ok"))` or `expect(getByText("ok"))`. Unwraps the
-/// same transparent wrappers as the target extraction so `await`/parens/casts
-/// do not hide the call (#91). Returns None when the argument is not a call.
+/// `expect(screen.getByText("ok"))` or `expect(getByText("ok"))`. `findBy*` is
+/// async, so an `await` wrapper is unwrapped (`expect(await findByText(...))`).
+/// Returns None when the argument is not a (member or bare) call (#91).
 fn arg_query_name<'a>(expr: &'a Expression<'a>) -> Option<&'a str> {
     match expr {
         Expression::CallExpression(call) => match &call.callee {
@@ -762,11 +762,6 @@ fn arg_query_name<'a>(expr: &'a Expression<'a>) -> Option<&'a str> {
             _ => None,
         },
         Expression::AwaitExpression(e) => arg_query_name(&e.argument),
-        Expression::ParenthesizedExpression(e) => arg_query_name(&e.expression),
-        Expression::TSAsExpression(e) => arg_query_name(&e.expression),
-        Expression::TSSatisfiesExpression(e) => arg_query_name(&e.expression),
-        Expression::TSNonNullExpression(e) => arg_query_name(&e.expression),
-        Expression::TSTypeAssertion(e) => arg_query_name(&e.expression),
         _ => None,
     }
 }
@@ -1393,6 +1388,32 @@ describe("outer", () => {
             expect(screen.queryByText("ok")).toBeTruthy()
         })"#,
         );
+        assert!(blocks[0].assertions[0].is_weak);
+    }
+
+    // T-319: a non-query call result (callee is itself a call, not a query
+    // identifier/member) keeps the weak matcher weak — the throwing-query
+    // exclusion only applies to real queries (#91).
+    #[test]
+    fn non_query_call_arg_stays_weak() {
+        let blocks = parse(
+            r#"test("maybe", () => {
+            expect(factory()()).toBeTruthy()
+        })"#,
+        );
+        assert!(blocks[0].assertions[0].is_weak);
+    }
+
+    // T-320: an argument-less `expect()` still yields a (weak) assertion; the
+    // throwing-query check sees no argument and leaves the matcher weak (#91).
+    #[test]
+    fn arg_less_expect_stays_weak() {
+        let blocks = parse(
+            r#"test("empty", () => {
+            expect().toBeTruthy()
+        })"#,
+        );
+        assert_eq!(blocks[0].assertions.len(), 1);
         assert!(blocks[0].assertions[0].is_weak);
     }
 
