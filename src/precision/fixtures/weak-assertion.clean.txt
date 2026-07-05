@@ -2,3 +2,12 @@ test("returns the sum of two positive numbers", () => {
   const result = add(2, 3);
   expect(result).toBe(5);
 });
+
+test("returns the sum of two positive numbers via node:assert", () => {
+  const result = add(2, 3);
+  assert.equal(result, 5);
+});
+
+test("validates a value asserted only via node:assert", () => {
+  assert.equal(currentUser.role, "admin");
+});
