@@ -1142,13 +1142,24 @@ fn is_assertion_call(call: &CallExpression<'_>) -> bool {
 
 /// Callee shape recognition shared by `is_assertion_call` (Act/assertion
 /// classification, #92 U-002) and `try_node_assert_call` (assertion
-/// content extraction): `assert.equal(a, b)` (member form) or bare
-/// `assert(x)` (call form). See `try_node_assert_call` for the method list.
+/// content extraction): `assert.equal(a, b)` (member form), bare
+/// `assert(x)` (call form), or the strict variant `assert.strict.equal(a, b)`
+/// (one level deep only; `assert.strict.strict.equal` is not recognized).
+/// The `property.name == "strict"` guard prevents over-recognition of
+/// unrelated member chains such as a user-defined `assert.foo.equal`.
+/// Computed member access (`assert["strict"].equal`) and optional chaining
+/// (`assert.strict?.equal`) are not recognized. See `try_node_assert_call`
+/// for the method list.
 fn is_node_assert_call(call: &CallExpression<'_>) -> bool {
     match &call.callee {
-        Expression::StaticMemberExpression(member) => {
-            matches!(&member.object, Expression::Identifier(obj) if obj.name == "assert")
-        }
+        Expression::StaticMemberExpression(member) => match &member.object {
+            Expression::Identifier(obj) => obj.name == "assert",
+            Expression::StaticMemberExpression(inner) => {
+                matches!(&inner.object, Expression::Identifier(obj) if obj.name == "assert")
+                    && inner.property.name == "strict"
+            }
+            _ => false,
+        },
         Expression::Identifier(id) => id.name == "assert",
         _ => false,
     }
@@ -3198,5 +3209,40 @@ describe("outer", () => {
     fn has_act_true_for_computed_destructuring_key_call() {
         let blocks = parse(r#"test("x", () => { const { [run()]: a } = obj; expect(a).toBe(1) })"#);
         assert!(blocks[0].has_act);
+    }
+
+    // T-001: assert.strict.equal を strong assertion として1件収集し weak-assertion を発火しない
+    #[test]
+    fn assert_strict_equal_を_strong_assertion_として1件収集し_weak_assertion_を発火しない() {
+        let blocks = parse(r#"test("name", () => { assert.strict.equal(a, b); })"#);
+        assert_eq!(blocks[0].assertions.len(), 1);
+        assert!(!blocks[0].assertions[0].is_weak);
+        let issues = check_weak_assertions(&blocks, Path::new("a.ts"));
+        assert!(
+            !issues.iter().any(|i| i.rule == "weak-assertion"),
+            "expected no weak-assertion, got: {:?}",
+            issues.iter().map(|i| i.rule).collect::<Vec<_>>()
+        );
+    }
+
+    // T-002: assert.strict.ok のみのテストを weak として weak-assertion 発火する
+    #[test]
+    fn assert_strict_ok_のみのテストを_weak_として_weak_assertion_発火する() {
+        let blocks = parse(r#"test("name", () => { assert.strict.ok(v); })"#);
+        let issues = check_weak_assertions(&blocks, Path::new("a.ts"));
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.rule == "weak-assertion" && i.detail.contains("only weak")),
+            "expected weak-assertion with 'only weak' detail, got: {:?}",
+            issues
+        );
+    }
+
+    // T-003: property が strict でない assert.foo.equal は assertion として収集しない
+    #[test]
+    fn property_が_strict_でない_assert_foo_equal_は_assertion_として収集しない() {
+        let blocks = parse(r#"test("name", () => { assert.foo.equal(a, b); })"#);
+        assert_eq!(blocks[0].assertions.len(), 0);
     }
 }
