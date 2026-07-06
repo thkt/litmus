@@ -695,21 +695,17 @@ fn try_assertion(
     src: &Source,
     context: &AssertionContext,
 ) -> Option<Assertion> {
+    if let Some(assertion) = try_node_assert_call(call, src, context) {
+        return Some(assertion);
+    }
+
     let Expression::StaticMemberExpression(member) = &call.callee else {
         return None;
     };
 
     let expect_call = find_expect_call(&member.object)?;
     let arg = expect_call.arguments.first();
-    let (target, target_kind, target_root) = match arg {
-        Some(arg) => {
-            let text = arg.span().source_text(src.text).to_owned();
-            let kind = classify_argument(arg);
-            let root = arg.as_expression().and_then(expr_root_ident);
-            (text, kind, root)
-        }
-        None => (String::new(), TargetKind::Other, None),
-    };
+    let (target, target_kind, target_root) = target_from_arg(arg, src);
     let matcher = member.property.name.to_string();
     // A weak matcher (toBeTruthy/toBeDefined/toBeFalsy) is normally weak, but a
     // throwing Testing Library query (getBy*/findBy*) in `expect(...)` already
@@ -719,6 +715,58 @@ fn try_assertion(
             .and_then(|arg| arg.as_expression())
             .and_then(arg_query_name)
             .is_some_and(is_throwing_query_name);
+    let line = src.line(call.span.start);
+
+    Some(Assertion {
+        line,
+        target,
+        target_kind,
+        target_root,
+        matcher,
+        is_weak,
+        context: *context,
+    })
+}
+
+/// node:assert recognition: `assert.equal(a, b)` (member form, callee shape
+/// mirrors `mock_kind`'s `obj.method` check) and bare `assert(x)` (call form).
+/// `assert(x)`/`assert.ok(x)` verify truthiness only, and `assert.fail([message])`
+/// throws unconditionally without comparing anything (its argument is a failure
+/// message, not a target), so all three are weak; the other documented
+/// comparison methods (equal/strictEqual/deepEqual/deepStrictEqual/
+/// notEqual/notStrictEqual/notDeepEqual/notDeepStrictEqual/match/throws/
+/// rejects) compare concrete values or control flow, so are strong. See
+/// https://nodejs.org/docs/latest/api/assert.html for the method list.
+fn try_node_assert_call(
+    call: &CallExpression<'_>,
+    src: &Source,
+    context: &AssertionContext,
+) -> Option<Assertion> {
+    if !is_node_assert_call(call) {
+        return None;
+    }
+    let (matcher, is_weak) = match &call.callee {
+        Expression::StaticMemberExpression(member) => {
+            let name = member.property.name.to_string();
+            // `assert.ok(x)` verifies truthiness only, so is weak. `assert.fail([message])`
+            // takes a failure message (not a value under test) as its first argument and
+            // throws unconditionally without comparing anything, so it is weak too (#98).
+            let is_weak = name == "ok" || name == "fail";
+            (name, is_weak)
+        }
+        Expression::Identifier(_) => ("assert".to_owned(), true),
+        _ => return None,
+    };
+
+    // `assert.fail(message)`'s first argument is a failure message, not an
+    // asserted value/target, so extracting it as the target would misreport
+    // the message text as a real comparison target (#98).
+    let arg = if matcher == "fail" {
+        None
+    } else {
+        call.arguments.first()
+    };
+    let (target, target_kind, target_root) = target_from_arg(arg, src);
     let line = src.line(call.span.start);
 
     Some(Assertion {
@@ -790,6 +838,24 @@ fn expr_root_ident(expr: &Expression<'_>) -> Option<String> {
         Expression::TSSatisfiesExpression(e) => expr_root_ident(&e.expression),
         Expression::TSTypeAssertion(e) => expr_root_ident(&e.expression),
         _ => None,
+    }
+}
+
+/// Builds the (target text, target kind, target root identifier) triple an
+/// assertion records from its first argument, shared by `try_assertion`
+/// (`expect(...)` matchers) and `try_node_assert_call` (`assert.*`).
+fn target_from_arg(
+    arg: Option<&Argument<'_>>,
+    src: &Source,
+) -> (String, TargetKind, Option<String>) {
+    match arg {
+        Some(arg) => {
+            let text = arg.span().source_text(src.text).to_owned();
+            let kind = classify_argument(arg);
+            let root = arg.as_expression().and_then(expr_root_ident);
+            (text, kind, root)
+        }
+        None => (String::new(), TargetKind::Other, None),
     }
 }
 
@@ -1069,7 +1135,23 @@ fn is_act_call(call: &CallExpression<'_>) -> bool {
 }
 
 fn is_assertion_call(call: &CallExpression<'_>) -> bool {
-    matches!(callee_name(&call.callee), Some(("expect", _))) || is_expect_chain(&call.callee)
+    matches!(callee_name(&call.callee), Some(("expect", _)))
+        || is_expect_chain(&call.callee)
+        || is_node_assert_call(call)
+}
+
+/// Callee shape recognition shared by `is_assertion_call` (Act/assertion
+/// classification, #92 U-002) and `try_node_assert_call` (assertion
+/// content extraction): `assert.equal(a, b)` (member form) or bare
+/// `assert(x)` (call form). See `try_node_assert_call` for the method list.
+fn is_node_assert_call(call: &CallExpression<'_>) -> bool {
+    match &call.callee {
+        Expression::StaticMemberExpression(member) => {
+            matches!(&member.object, Expression::Identifier(obj) if obj.name == "assert")
+        }
+        Expression::Identifier(id) => id.name == "assert",
+        _ => false,
+    }
 }
 
 fn is_expect_chain(expr: &Expression<'_>) -> bool {
@@ -1152,6 +1234,7 @@ impl<'a> Source<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rules::{check_missing_act, check_weak_assertions};
     use std::path::Path;
 
     fn parse(source: &str) -> Vec<TestBlock> {
@@ -1311,6 +1394,99 @@ describe("outer", () => {
     fn captures_to_match_inline_snapshot_matcher() {
         let blocks = parse(r#"test("x", () => { expect(x).toMatchInlineSnapshot(`1`) })"#);
         assert_eq!(blocks[0].assertions[0].matcher, "toMatchInlineSnapshot");
+    }
+
+    // T-001: node:test callback 内の `assert.equal` を assertion として数え
+    // weak-assertion を発火しない
+    #[test]
+    fn node_test_callback_内の_assert_equal_を_assertion_として数え_weak_assertion_を発火しない() {
+        let source = r#"test("name", async () => { assert.equal(result, 5); })"#;
+        let blocks = parse(source);
+        assert!(!blocks[0].assertions.is_empty());
+        let issues = check_weak_assertions(&blocks, Path::new("a.ts"));
+        assert!(
+            !issues.iter().any(|i| i.rule == "weak-assertion"),
+            "expected no weak-assertion, got: {:?}",
+            issues.iter().map(|i| i.rule).collect::<Vec<_>>()
+        );
+    }
+
+    // T-002: bare `assert(x)` を weak assertion として認識する
+    #[test]
+    fn bare_assert_x_を_weak_assertion_として認識する() {
+        let blocks = parse(r#"test("name", () => { assert(cond); })"#);
+        assert_eq!(blocks[0].assertions.len(), 1);
+        assert!(blocks[0].assertions[0].is_weak);
+    }
+
+    // T-003: `assert.strictEqual` を strong assertion として分類する
+    #[test]
+    fn assert_strictequal_を_strong_assertion_として分類する() {
+        let blocks = parse(r#"test("name", () => { assert.strictEqual(a, b); })"#);
+        assert_eq!(blocks[0].assertions.len(), 1);
+        assert!(!blocks[0].assertions[0].is_weak);
+    }
+
+    // T-004: `assert.ok` のみのテストを weak として weak-assertion 発火する
+    #[test]
+    fn assert_ok_のみのテストを_weak_として_weak_assertion_発火する() {
+        let blocks = parse(r#"test("name", () => { assert.ok(v); })"#);
+        let issues = check_weak_assertions(&blocks, Path::new("a.ts"));
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.rule == "weak-assertion" && i.detail.contains("only weak")),
+            "expected weak-assertion with 'only weak' detail, got: {:?}",
+            issues
+        );
+    }
+
+    // #98: `assert.fail(message)`'s argument is a failure message, not an
+    // asserted value, so it must not be recorded as the assertion target and
+    // must count as weak (no real value comparison happened).
+    #[test]
+    fn assert_fail_のメッセージ引数をtargetとして誤抽出しない() {
+        let blocks = parse(r#"test("name", () => { assert.fail("should not reach here"); })"#);
+        assert_eq!(blocks[0].assertions.len(), 1);
+        let assertion = &blocks[0].assertions[0];
+        assert!(assertion.is_weak, "assert.fail must be classified as weak");
+        assert_eq!(
+            assertion.target, "",
+            "assert.fail's message must not be recorded as the target"
+        );
+        assert_eq!(assertion.target_kind, TargetKind::Other);
+    }
+
+    // T-005: コールバック内 assert のみのテストが missing-act を発火しない
+    //
+    // The body's only call is the node:assert call itself (no other production
+    // call), so this discriminates `is_act_call`/`is_assertion_call` treating
+    // `assert.equal` as an Act (current, unfixed behavior: has_act wrongly
+    // becomes true, masking a real missing-act) from treating it as an
+    // assertion (target behavior: has_act stays false).
+    #[test]
+    fn コールバック内_assert_のみのテストが_missing_act_を発火しない() {
+        let blocks = parse(r#"test("name", () => { assert.equal(result, 1); })"#);
+        assert!(
+            !blocks[0].has_act,
+            "assert.equal alone must not be classified as an Act call"
+        );
+    }
+
+    // T-005b: an arranged value asserted via node:assert with no real Act call
+    // is missing-act. Under the current, unfixed classification, `assert.equal`
+    // itself is wrongly treated as the Act, so missing-act stays silent (false
+    // negative). Once U-002 makes `is_assertion_call` recognize node:assert
+    // calls, `has_act` is false and `asserts_arranged` fires missing-act.
+    #[test]
+    fn assert_のみでarrangeした値を検証するテストはmissing_actを発火する() {
+        let blocks = parse(r#"test("name", () => { const r = 5; assert.equal(r, 5); })"#);
+        let issues = check_missing_act(&blocks, Path::new("a.ts"));
+        assert!(
+            issues.iter().any(|i| i.rule == "missing-act"),
+            "expected missing-act, got: {:?}",
+            issues.iter().map(|i| i.rule).collect::<Vec<_>>()
+        );
     }
 
     // T-006: mixed weak and strong
